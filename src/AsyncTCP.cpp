@@ -375,6 +375,22 @@ static bool _start_async_task() {
  * LwIP Callbacks
  * */
 
+static void _bind_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
+  tcp_arg(pcb, client);
+  tcp_recv(pcb, &AsyncTCP_detail::tcp_recv);
+  tcp_sent(pcb, &AsyncTCP_detail::tcp_sent);
+  tcp_err(pcb, &AsyncTCP_detail::tcp_error);
+  tcp_poll(pcb, &AsyncTCP_detail::tcp_poll, CONFIG_ASYNC_TCP_POLL_TIMER);
+}
+
+static void _reset_tcp_callbacks(tcp_pcb *pcb) {
+  tcp_arg(pcb, NULL);
+  tcp_sent(pcb, NULL);
+  tcp_recv(pcb, NULL);
+  tcp_err(pcb, NULL);
+  tcp_poll(pcb, NULL, 0);
+}
+
 static int8_t _tcp_clear_events(AsyncClient *client) {
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CLEAR, client};
   if (!e) {
@@ -472,13 +488,7 @@ void AsyncTCP_detail::tcp_error(void *arg, int8_t err) {
   // ets_printf("+E: 0x%08x\n", arg);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   if (client && client->_pcb) {
-    tcp_arg(client->_pcb, NULL);
-    if (client->_pcb->state == LISTEN) {
-      ::tcp_sent(client->_pcb, NULL);
-      ::tcp_recv(client->_pcb, NULL);
-      ::tcp_err(client->_pcb, NULL);
-      ::tcp_poll(client->_pcb, NULL, 0);
-    }
+    _reset_tcp_callbacks(client->_pcb);
     client->_pcb = nullptr;
     client->_free_closed_slot();
   }
@@ -724,11 +734,7 @@ AsyncClient::AsyncClient(tcp_pcb *pcb)
   _closed_slot = INVALID_CLOSED_SLOT;
   if (_pcb) {
     _rx_last_packet = millis();
-    tcp_arg(_pcb, this);
-    tcp_recv(_pcb, &AsyncTCP_detail::tcp_recv);
-    tcp_sent(_pcb, &AsyncTCP_detail::tcp_sent);
-    tcp_err(_pcb, &AsyncTCP_detail::tcp_error);
-    tcp_poll(_pcb, &AsyncTCP_detail::tcp_poll, CONFIG_ASYNC_TCP_POLL_TIMER);
+    _bind_tcp_callbacks(_pcb, this);
     if (!_allocate_closed_slot()) {
       _close();
     }
@@ -821,11 +827,7 @@ bool AsyncClient::connect(ip_addr_t addr, uint16_t port) {
       log_e("pcb == NULL");
       return false;
     }
-    tcp_arg(pcb, this);
-    tcp_err(pcb, &AsyncTCP_detail::tcp_error);
-    tcp_recv(pcb, &AsyncTCP_detail::tcp_recv);
-    tcp_sent(pcb, &AsyncTCP_detail::tcp_sent);
-    tcp_poll(pcb, &AsyncTCP_detail::tcp_poll, CONFIG_ASYNC_TCP_POLL_TIMER);
+    _bind_tcp_callbacks(pcb, this);
   }
 
   esp_err_t err = _tcp_connect(pcb, _closed_slot, &addr, port, (tcp_connected_fn)&_tcp_connected);
@@ -968,11 +970,7 @@ int8_t AsyncClient::_close() {
   if (_pcb) {
     {
       tcp_core_guard tcg;
-      tcp_arg(_pcb, NULL);
-      tcp_sent(_pcb, NULL);
-      tcp_recv(_pcb, NULL);
-      tcp_err(_pcb, NULL);
-      tcp_poll(_pcb, NULL, 0);
+      _reset_tcp_callbacks(_pcb);
     }
     _tcp_clear_events(this);
     err = _tcp_close(_pcb, _closed_slot);
@@ -1052,13 +1050,7 @@ int8_t AsyncClient::_lwip_fin(tcp_pcb *pcb, int8_t err) {
     log_d("0x%08" PRIx32 " != 0x%08" PRIx32, (uint32_t)pcb, (uint32_t)_pcb);
     return ERR_OK;
   }
-  tcp_arg(_pcb, NULL);
-  if (_pcb->state == LISTEN) {
-    tcp_sent(_pcb, NULL);
-    tcp_recv(_pcb, NULL);
-    tcp_err(_pcb, NULL);
-    tcp_poll(_pcb, NULL, 0);
-  }
+  _reset_tcp_callbacks(_pcb);
   if (tcp_close(_pcb) != ERR_OK) {
     tcp_abort(_pcb);
   }
