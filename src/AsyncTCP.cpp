@@ -91,7 +91,6 @@ typedef enum {
   LWIP_TCP_FIN,
   LWIP_TCP_ERROR,
   LWIP_TCP_POLL,
-  LWIP_TCP_CLEAR,
   LWIP_TCP_ACCEPT,
   LWIP_TCP_CONNECTED,
   LWIP_TCP_DNS
@@ -276,8 +275,6 @@ void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
   if (e->client == NULL) {
     // do nothing when arg is NULL
     // ets_printf("event arg == NULL: 0x%08x\n", e->recv.pcb);
-  } else if (e->event == LWIP_TCP_CLEAR) {
-    _remove_events_for_client(e->client);
   } else if (e->event == LWIP_TCP_RECV) {
     // ets_printf("-R: 0x%08x\n", e->recv.pcb);
     e->client->_recv(e->recv.pcb, e->recv.pb, e->recv.err);
@@ -383,23 +380,15 @@ static void _bind_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
   tcp_poll(pcb, &AsyncTCP_detail::tcp_poll, CONFIG_ASYNC_TCP_POLL_TIMER);
 }
 
-static void _reset_tcp_callbacks(tcp_pcb *pcb) {
+static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
   tcp_arg(pcb, NULL);
   tcp_sent(pcb, NULL);
   tcp_recv(pcb, NULL);
   tcp_err(pcb, NULL);
   tcp_poll(pcb, NULL, 0);
-}
-
-static int8_t _tcp_clear_events(AsyncClient *client) {
-  lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CLEAR, client};
-  if (!e) {
-    log_e("Failed to allocate event packet");
-    return ERR_MEM;
+  if (client) {
+    _remove_events_for_client(client);
   }
-  queue_mutex_guard guard;
-  _prepend_async_event(e);
-  return ERR_OK;
 }
 
 static int8_t _tcp_connected(void *arg, tcp_pcb *pcb, int8_t err) {
@@ -460,7 +449,7 @@ int8_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb
     e->fin.pcb = pcb;
     e->fin.err = err;
     // close the PCB in LwIP thread
-    reinterpret_cast<AsyncClient *>(arg)->_lwip_fin(e->fin.pcb, e->fin.err);
+    client->_lwip_fin(e->fin.pcb, e->fin.err);
   }
 
   queue_mutex_guard guard;
@@ -488,7 +477,7 @@ void AsyncTCP_detail::tcp_error(void *arg, int8_t err) {
   // ets_printf("+E: 0x%08x\n", arg);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   if (client && client->_pcb) {
-    _reset_tcp_callbacks(client->_pcb);
+    _reset_tcp_callbacks(client->_pcb, client);
     client->_pcb = nullptr;
     client->_free_closed_slot();
   }
@@ -970,9 +959,8 @@ int8_t AsyncClient::_close() {
   if (_pcb) {
     {
       tcp_core_guard tcg;
-      _reset_tcp_callbacks(_pcb);
+      _reset_tcp_callbacks(_pcb, this);
     }
-    _tcp_clear_events(this);
     err = _tcp_close(_pcb, _closed_slot);
     if (err != ERR_OK) {
       err = abort();
@@ -1050,7 +1038,7 @@ int8_t AsyncClient::_lwip_fin(tcp_pcb *pcb, int8_t err) {
     log_d("0x%08" PRIx32 " != 0x%08" PRIx32, (uint32_t)pcb, (uint32_t)_pcb);
     return ERR_OK;
   }
-  _reset_tcp_callbacks(_pcb);
+  _reset_tcp_callbacks(_pcb, this);
   if (tcp_close(_pcb) != ERR_OK) {
     tcp_abort(_pcb);
   }
@@ -1061,7 +1049,6 @@ int8_t AsyncClient::_lwip_fin(tcp_pcb *pcb, int8_t err) {
 
 // In Async Thread
 int8_t AsyncClient::_fin(tcp_pcb *pcb, int8_t err) {
-  _tcp_clear_events(this);
   if (_discard_cb) {
     _discard_cb(_discard_cb_arg, this);
   }
