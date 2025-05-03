@@ -527,6 +527,7 @@ typedef struct {
   int8_t closed_slot;
   int8_t err;
   union {
+    AsyncClient *close;
     struct {
       const char *data;
       size_t size;
@@ -617,18 +618,25 @@ static err_t _tcp_close_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
   if (msg->closed_slot == INVALID_CLOSED_SLOT || !_closed_slots[msg->closed_slot]) {
+    // Unlike the other calls, this is not a direct wrapper of the LwIP function;
+    // we perform the AsyncClient teardown interlocked safely with the LwIP task.
+    _reset_tcp_callbacks(msg->pcb, msg->close);
     msg->err = tcp_close(msg->pcb);
+    if (msg->err != ERR_OK) {
+      tcp_abort(msg->pcb);
+    }
   }
   return msg->err;
 }
 
-static esp_err_t _tcp_close(tcp_pcb *pcb, int8_t closed_slot) {
+static esp_err_t _tcp_close(tcp_pcb *pcb, int8_t closed_slot, AsyncClient *client) {
   if (!pcb) {
     return ERR_CONN;
   }
   tcp_api_call_t msg;
   msg.pcb = pcb;
   msg.closed_slot = closed_slot;
+  msg.close = client;
   tcpip_api_call(_tcp_close_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
 }
@@ -963,14 +971,7 @@ int8_t AsyncClient::_close() {
   // ets_printf("X: 0x%08x\n", (uint32_t)this);
   int8_t err = ERR_OK;
   if (_pcb) {
-    {
-      tcp_core_guard tcg;
-      _reset_tcp_callbacks(_pcb, this);
-    }
-    err = _tcp_close(_pcb, _closed_slot);
-    if (err != ERR_OK) {
-      err = abort();
-    }
+    _tcp_close(_pcb, _closed_slot, this);
     _free_closed_slot();
     _pcb = NULL;
     if (_discard_cb) {
