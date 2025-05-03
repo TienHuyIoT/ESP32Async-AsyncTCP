@@ -676,6 +676,12 @@ static esp_err_t _tcp_connect(tcp_pcb *pcb, int8_t closed_slot, ip_addr_t *addr,
 static err_t _tcp_bind_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = tcp_bind(msg->pcb, msg->bind.addr, msg->bind.port);
+  if (msg->err != ERR_OK) {
+    // Close the pcb on behalf of the server without an extra round-trip through the LwIP lock
+    if (tcp_close(msg->pcb) != ERR_OK) {
+      tcp_abort(msg->pcb);
+    }
+  }
   return msg->err;
 }
 
@@ -1495,7 +1501,7 @@ void AsyncServer::begin() {
   err = _tcp_bind(_pcb, &_addr, _port);
 
   if (err != ERR_OK) {
-    _tcp_close(_pcb, -1);
+    // pcb was closed by _tcp_bind
     _pcb = NULL;
     log_e("bind error: %d", err);
     return;
