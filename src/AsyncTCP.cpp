@@ -1089,8 +1089,8 @@ int8_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, int8_t err) {
       } else if (_pcb) {
         _tcp_recved(_pcb, _closed_slot, b->len);
       }
+      pbuf_free(b);
     }
-    pbuf_free(b);
   }
   return ERR_OK;
 }
@@ -1467,7 +1467,7 @@ AsyncServer::AsyncServer(IPv6Address addr, uint16_t port) : _port(port), _noDela
 #endif
 
 AsyncServer::AsyncServer(uint16_t port) : _port(port), _noDelay(false), _pcb(0), _connect_cb(0), _connect_cb_arg(0) {
-  _addr.type = IPADDR_TYPE_V4;
+  _addr.type = IPADDR_TYPE_ANY;
   _addr.u_addr.ip4.addr = INADDR_ANY;
 }
 
