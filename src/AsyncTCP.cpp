@@ -42,7 +42,11 @@ extern "C" {
 
 #if CONFIG_ASYNC_TCP_USE_WDT
 #include "esp_task_wdt.h"
+#if (ESP_IDF_VERSION_MAJOR >= 4) // IDF 4+
 #define ASYNC_TCP_MAX_TASK_SLEEP (pdMS_TO_TICKS(1000 * CONFIG_ESP_TASK_WDT_TIMEOUT_S) / 4)
+#else
+#define ASYNC_TCP_MAX_TASK_SLEEP (pdMS_TO_TICKS(1000 * CONFIG_TASK_WDT_TIMEOUT_S) / 4)
+#endif
 #else
 #define ASYNC_TCP_MAX_TASK_SLEEP portMAX_DELAY
 #endif
@@ -1554,8 +1558,9 @@ int8_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, int8_t err) {
 
       // Couldn't allocate accept event
       // We can't let the client object call in to close, as we're on the LWIP thread; it could deadlock trying to RPC to itself
-      c->_pcb = nullptr;
-      tcp_abort(pcb);
+      // c->_pcb = nullptr;
+      // tcp_abort(pcb);
+      delete c;
       log_e("_accept failed: couldn't accept client");
       return ERR_ABRT;
     }
@@ -1563,7 +1568,7 @@ int8_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, int8_t err) {
       // Couldn't complete setup
       // pcb has already been aborted
       delete c;
-      pcb = nullptr;
+      // pcb = nullptr;
       log_e("_accept failed: couldn't complete setup");
       return ERR_ABRT;
     }
