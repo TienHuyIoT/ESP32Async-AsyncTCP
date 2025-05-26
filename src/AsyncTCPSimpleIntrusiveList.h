@@ -44,6 +44,7 @@ public:
     if (obj) {
       *_tail = obj;
       _tail = &obj->next;
+      ++_size;
     }
   }
 
@@ -54,6 +55,7 @@ public:
       }
       obj->next = _head;
       _head = obj;
+      ++_size;
     }
   }
 
@@ -64,6 +66,7 @@ public:
         _tail = &_head;
       }
       _head = _head->next;
+      --_size;
     }
     return rv;
   }
@@ -73,10 +76,11 @@ public:
     delete_list(_head);
     _head = nullptr;
     _tail = &_head;
+    _size = 0;
   }
 
   inline size_t size() const {
-    return list_size(_head);
+    return _size;
   }
 
   template<typename function_type> inline value_ptr_type remove_if(const function_type &condition) {
@@ -91,6 +95,7 @@ public:
         if (current->next == nullptr) {
           _tail = current_ptr;
         }
+        --_size;
         // Prepend this item to the removed list
         current->next = removed;
         removed = current;
@@ -124,5 +129,6 @@ private:
   // Data members
   value_ptr_type _head;
   value_ptr_ptr_type _tail;
+  size_t _size;
 
 };  // class simple_intrusive_list
