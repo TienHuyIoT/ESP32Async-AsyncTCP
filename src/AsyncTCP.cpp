@@ -152,21 +152,17 @@ public:
 
 // Guard class for the global queue
 namespace {
-class queue_mutex_guard {
-  // Create-on-first-use idiom for an embedded mutex
-  static SemaphoreHandle_t _async_queue_mutex() {
-    static SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
-    assert(mutex != nullptr);
-    return mutex;
-  };
 
+static SemaphoreHandle_t _async_queue_mutex = nullptr;
+
+class queue_mutex_guard {
   bool holds_mutex;
 
 public:
-  inline queue_mutex_guard() : holds_mutex(xSemaphoreTake(_async_queue_mutex(), portMAX_DELAY)){};
+  inline queue_mutex_guard() : holds_mutex(xSemaphoreTake(_async_queue_mutex, portMAX_DELAY)){};
   inline ~queue_mutex_guard() {
     if (holds_mutex) {
-      xSemaphoreGive(_async_queue_mutex());
+      xSemaphoreGive(_async_queue_mutex);
     }
   };
   inline explicit operator bool() const {
@@ -357,6 +353,13 @@ static bool customTaskCreateUniversal(
 }
 
 static bool _start_async_task() {
+  if (!_async_queue_mutex) {
+    _async_queue_mutex = xSemaphoreCreateMutex();
+    if (!_async_queue_mutex) {
+      return false;
+    }
+  }
+
   if (!_async_service_task_handle) {
     customTaskCreateUniversal(
       _async_service_task, "async_tcp", CONFIG_ASYNC_TCP_STACK_SIZE, NULL, CONFIG_ASYNC_TCP_PRIORITY, &_async_service_task_handle, CONFIG_ASYNC_TCP_RUNNING_CORE
