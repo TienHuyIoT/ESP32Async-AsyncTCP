@@ -112,7 +112,8 @@ typedef enum {
   LWIP_TCP_POLL,
   LWIP_TCP_ACCEPT,
   LWIP_TCP_CONNECTED,
-  LWIP_TCP_DNS
+  LWIP_TCP_DNS,
+  LWIP_TCP_CALLBACK
 } lwip_tcp_event_t;
 
 struct lwip_tcp_event_packet_t {
@@ -120,6 +121,10 @@ struct lwip_tcp_event_packet_t {
   lwip_tcp_event_t event;
   AsyncClient *client;
   union {
+    struct {
+      void *arg;
+      asynctcp_callback_fn fn;
+    } callback;
     struct {
       tcp_pcb *pcb;
       int8_t err;
@@ -286,10 +291,26 @@ static void _remove_events_for_client(AsyncClient *client) {
   }
 };
 
+void asynctcp_callback(asynctcp_callback_fn function, void *ctx) {
+  lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CALLBACK, nullptr};
+  if (!e) {
+    log_e("Failed to allocate event packet");
+    return;
+  }
+  e->callback.fn = function;
+  e->callback.arg = ctx;
+
+  queue_mutex_guard guard;
+  _send_async_event(e);
+}
+
 void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
   if (e->client == NULL) {
     // do nothing when arg is NULL
     // ets_printf("event arg == NULL: 0x%08x\n", e->recv.pcb);
+    if (e->event == LWIP_TCP_CALLBACK) {
+      e->callback.fn(e->callback.arg);
+    }
   } else if (e->event == LWIP_TCP_RECV) {
     // ets_printf("-R: 0x%08x\n", e->recv.pcb);
     e->client->_recv(e->recv.pcb, e->recv.pb, e->recv.err);

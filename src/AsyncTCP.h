@@ -74,6 +74,10 @@ typedef std::function<void(void *, AsyncClient *, void *data, size_t len)> AcDat
 typedef std::function<void(void *, AsyncClient *, struct pbuf *pb)> AcPacketHandler;
 typedef std::function<void(void *, AsyncClient *, uint32_t time)> AcTimeoutHandler;
 
+/** Function prototype for functions passed to asynctcp_callback() */
+typedef void (*asynctcp_callback_fn)(void *ctx);
+void asynctcp_callback(asynctcp_callback_fn function, void *ctx);
+
 struct tcp_pcb;
 struct ip_addr;
 class AsyncTCP_detail;
