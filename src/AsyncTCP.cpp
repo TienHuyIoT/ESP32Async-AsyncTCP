@@ -291,6 +291,7 @@ static void _remove_events_for_client(AsyncClient *client) {
   }
 };
 
+#if (defined ASYNC_TCP_CALLBACK_IMPL) && (ASYNC_TCP_CALLBACK_IMPL == 1)
 void asynctcp_callback(asynctcp_callback_fn function, void *ctx) {
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CALLBACK, nullptr};
   if (!e) {
@@ -303,6 +304,7 @@ void asynctcp_callback(asynctcp_callback_fn function, void *ctx) {
   queue_mutex_guard guard;
   _send_async_event(e);
 }
+#endif
 
 void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
   if (e->client == NULL) {
@@ -955,10 +957,11 @@ void AsyncClient::close(bool now) {
 }
 
 int8_t AsyncClient::abort() {
-  if (_pcb) {
-    _tcp_abort(_pcb, _closed_slot);
-    _pcb = NULL;
-  }
+  close();
+  // if (_pcb) {
+  //   _tcp_abort(_pcb, _closed_slot);
+  //   _pcb = NULL;
+  // }
   return ERR_ABRT;
 }
 

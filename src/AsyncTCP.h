@@ -62,6 +62,8 @@ extern "C" {
 #define CONFIG_ASYNC_TCP_MAX_ACK_TIME 5000
 #endif
 
+#define ASYNC_TCP_CALLBACK_IMPL   1
+
 class AsyncClient;
 
 #define ASYNC_WRITE_FLAG_COPY 0x01  // will allocate new buffer to hold the data while sending (else will hold reference to the data given)
@@ -74,9 +76,11 @@ typedef std::function<void(void *, AsyncClient *, void *data, size_t len)> AcDat
 typedef std::function<void(void *, AsyncClient *, struct pbuf *pb)> AcPacketHandler;
 typedef std::function<void(void *, AsyncClient *, uint32_t time)> AcTimeoutHandler;
 
+#if (defined ASYNC_TCP_CALLBACK_IMPL) && (ASYNC_TCP_CALLBACK_IMPL == 1)
 /** Function prototype for functions passed to asynctcp_callback() */
 typedef void (*asynctcp_callback_fn)(void *ctx);
 void asynctcp_callback(asynctcp_callback_fn function, void *ctx);
+#endif
 
 struct tcp_pcb;
 struct ip_addr;
