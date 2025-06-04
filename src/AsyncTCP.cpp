@@ -8,6 +8,7 @@
 #include <esp_log.h>
 
 #ifdef ARDUINO
+#include "Arduino.h"
 #include <esp32-hal.h>
 #include <esp32-hal-log.h>
 #if (ESP_IDF_VERSION_MAJOR >= 5)
@@ -51,6 +52,9 @@ extern "C" {
 #if CONFIG_ASYNC_TCP_USE_WDT
 #include "esp_task_wdt.h"
 #endif
+
+#define ASYNC_TCP_CONSOLE(f_, ...)  //Serial.printf_P(PSTR("\r\n\n[AsyncTCP] %s() line %u: " f_ "\r\n\n"),  __func__, __LINE__, ##__VA_ARGS__)
+
 
 // Required for:
 // https://github.com/espressif/arduino-esp32/blob/3.0.3/libraries/Network/src/NetworkInterface.cpp#L37-L47
@@ -520,6 +524,7 @@ int8_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
 
 void AsyncTCP_detail::tcp_error(void *arg, int8_t err) {
   // ets_printf("+E: 0x%08x\n", arg);
+  ASYNC_TCP_CONSOLE("%u", arg);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   if (client && client->_pcb) {
     _reset_tcp_callbacks(client->_pcb, client);
@@ -785,12 +790,17 @@ AsyncClient::AsyncClient(tcp_pcb *pcb)
     _bind_tcp_callbacks(_pcb, this);
     if (!_allocate_closed_slot()) {
       _close();
+      ASYNC_TCP_CONSOLE("Allocate %u failure", this);
+    } else {
+      ASYNC_TCP_CONSOLE("Allocate %u succeed", this);
     }
   }
 }
 
 AsyncClient::~AsyncClient() {
+  ASYNC_TCP_CONSOLE("Deallocate %u", this);
   if (_pcb) {
+    ASYNC_TCP_CONSOLE("%u: close", this);
     _close();
   }
   _free_closed_slot();
@@ -951,17 +961,18 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
 
 void AsyncClient::close(bool now) {
   if (_pcb) {
+    ASYNC_TCP_CONSOLE("%u", this);
     _tcp_recved(_pcb, _closed_slot, _rx_ack_len);
   }
   _close();
 }
 
 int8_t AsyncClient::abort() {
-  close();
-  // if (_pcb) {
-  //   _tcp_abort(_pcb, _closed_slot);
-  //   _pcb = NULL;
-  // }
+  if (_pcb) {
+    ASYNC_TCP_CONSOLE("%u", this);
+    _tcp_abort(_pcb, _closed_slot);
+    _pcb = NULL;
+  }
   return ERR_ABRT;
 }
 
@@ -1030,6 +1041,7 @@ int8_t AsyncClient::_close() {
     _free_closed_slot();
     _pcb = NULL;
     if (_discard_cb) {
+      ASYNC_TCP_CONSOLE("%u: disconnect", this);
       _discard_cb(_discard_cb_arg, this);
     }
   }
@@ -1050,6 +1062,7 @@ bool AsyncClient::_allocate_closed_slot() {
       }
       allocated = _closed_slot != INVALID_CLOSED_SLOT;
       if (allocated) {
+        ASYNC_TCP_CONSOLE("%u: _closed_slot = %d, _closed_index = %u, ", this, _closed_slot, _closed_index);
         _closed_slots[_closed_slot] = 0;
       }
     }
@@ -1061,6 +1074,7 @@ bool AsyncClient::_allocate_closed_slot() {
 void AsyncClient::_free_closed_slot() {
   xSemaphoreTake(_slots_lock, portMAX_DELAY);
   if (_closed_slot != INVALID_CLOSED_SLOT) {
+    ASYNC_TCP_CONSOLE("%u: _closed_slot = %d, _closed_index = %u, ", this, _closed_slot, _closed_index);
     _closed_slots[_closed_slot] = _closed_index;
     _closed_slot = INVALID_CLOSED_SLOT;
     ++_closed_index;
@@ -1090,6 +1104,7 @@ void AsyncClient::_error(int8_t err) {
     _error_cb(_error_cb_arg, this, err);
   }
   if (_discard_cb) {
+    ASYNC_TCP_CONSOLE("%u: disconnect", this);
     _discard_cb(_discard_cb_arg, this);
   }
 }
@@ -1100,6 +1115,7 @@ int8_t AsyncClient::_lwip_fin(tcp_pcb *pcb, int8_t err) {
     log_d("0x%08" PRIx32 " != 0x%08" PRIx32, (uint32_t)pcb, (uint32_t)_pcb);
     return ERR_OK;
   }
+  ASYNC_TCP_CONSOLE("%u", this);
   _reset_tcp_callbacks(_pcb, this);
   if (tcp_close(_pcb) != ERR_OK) {
     tcp_abort(_pcb);
@@ -1112,6 +1128,7 @@ int8_t AsyncClient::_lwip_fin(tcp_pcb *pcb, int8_t err) {
 // In Async Thread
 int8_t AsyncClient::_fin(tcp_pcb *pcb, int8_t err) {
   if (_discard_cb) {
+    ASYNC_TCP_CONSOLE("%u: disconnect", this);
     _discard_cb(_discard_cb_arg, this);
   }
   return ERR_OK;
@@ -1177,6 +1194,7 @@ int8_t AsyncClient::_poll(tcp_pcb *pcb) {
   // RX Timeout
   if (_rx_timeout && (now - _rx_last_packet) >= (_rx_timeout * 1000)) {
     log_d("rx timeout %d", pcb->state);
+    ASYNC_TCP_CONSOLE("%u: rx timeout", this);
     _close();
     return ERR_OK;
   }
@@ -1195,6 +1213,7 @@ void AsyncClient::_dns_found(ip_addr_t *ipaddr) {
       _error_cb(_error_cb_arg, this, -55);
     }
     if (_discard_cb) {
+      ASYNC_TCP_CONSOLE("%u: disconnect", this);
       _discard_cb(_discard_cb_arg, this);
     }
   }
