@@ -539,7 +539,7 @@ void AsyncTCP_detail::tcp_error(void *arg, int8_t err) {
   _send_async_event(e);
 }
 
-static void _tcp_dns_found(const char *name, struct ip_addr *ipaddr, void *arg) {
+static void _tcp_dns_found(const char *name, ip_addr_t *ipaddr, void *arg) {
   // ets_printf("+DNS: name=%s ipaddr=0x%08x arg=%x\n", name, ipaddr, arg);
   auto client = reinterpret_cast<AsyncClient *>(arg);
 
@@ -551,7 +551,7 @@ static void _tcp_dns_found(const char *name, struct ip_addr *ipaddr, void *arg) 
 
   e->dns.name = name;
   if (ipaddr) {
-    memcpy(&e->dns.addr, ipaddr, sizeof(struct ip_addr));
+    memcpy(&e->dns.addr, ipaddr, sizeof(ip_addr_t));
   } else {
     memset(&e->dns.addr, 0, sizeof(e->dns.addr));
   }
@@ -1187,7 +1187,7 @@ int8_t AsyncClient::_poll(tcp_pcb *pcb) {
   return ERR_OK;
 }
 
-void AsyncClient::_dns_found(struct ip_addr *ipaddr) {
+void AsyncClient::_dns_found(ip_addr_t *ipaddr) {
   if (ipaddr) {
     connect(*ipaddr, _connect_port);
   } else {
