@@ -71,7 +71,7 @@ class AsyncClient;
 
 typedef std::function<void(void *, AsyncClient *)> AcConnectHandler;
 typedef std::function<void(void *, AsyncClient *, size_t len, uint32_t time)> AcAckHandler;
-typedef std::function<void(void *, AsyncClient *, int8_t error)> AcErrorHandler;
+typedef std::function<void(void *, AsyncClient *, err_t error)> AcErrorHandler;
 typedef std::function<void(void *, AsyncClient *, void *data, size_t len)> AcDataHandler;
 typedef std::function<void(void *, AsyncClient *, struct pbuf *pb)> AcPacketHandler;
 typedef std::function<void(void *, AsyncClient *, uint32_t time)> AcTimeoutHandler;
@@ -121,9 +121,9 @@ public:
   void stop() {
     close(false);
   };
-  int8_t abort();
+  err_t abort();
   bool free();
-
+  bool valid();
   // ack is not pending
   bool canSend() const;
   // TCP buffer space available
@@ -262,10 +262,10 @@ public:
     _ack_pcb = false;
   }
 
-  static const char *errorToString(int8_t error);
+  static const char *errorToString(err_t error);
   const char *stateToString() const;
 
-  int8_t _recv(tcp_pcb *pcb, pbuf *pb, int8_t err);
+  err_t _recv(tcp_pcb *pcb, pbuf *pb, err_t err);
   tcp_pcb *pcb() {
     return _pcb;
   }
@@ -303,15 +303,15 @@ protected:
   uint32_t _ack_timeout;
   uint16_t _connect_port;
 
-  int8_t _close();
+  err_t _close();
   void _free_closed_slot();
   bool _allocate_closed_slot();
-  int8_t _connected(tcp_pcb *pcb, int8_t err);
-  void _error(int8_t err);
-  int8_t _poll(tcp_pcb *pcb);
-  int8_t _sent(tcp_pcb *pcb, uint16_t len);
-  int8_t _fin(tcp_pcb *pcb, int8_t err);
-  int8_t _lwip_fin(tcp_pcb *pcb, int8_t err);
+  err_t _connected(tcp_pcb *pcb, err_t err);
+  void _error(err_t err);
+  err_t _poll(tcp_pcb *pcb);
+  err_t _sent(tcp_pcb *pcb, uint16_t len);
+  err_t _fin(tcp_pcb *pcb, err_t err);
+  err_t _lwip_fin(tcp_pcb *pcb, err_t err);
   void _dns_found(ip_addr_t *ipaddr);
 };
 
@@ -343,8 +343,8 @@ protected:
   AcConnectHandler _connect_cb;
   void *_connect_cb_arg;
 
-  int8_t _accept(tcp_pcb *newpcb, int8_t err);
-  int8_t _accepted(AsyncClient *client);
+  err_t _accept(tcp_pcb *newpcb, err_t err);
+  err_t _accepted(AsyncClient *client);
 };
 
 #endif /* ASYNCTCP_H_ */

@@ -131,10 +131,10 @@ struct lwip_tcp_event_packet_t {
     } callback;
     struct {
       tcp_pcb *pcb;
-      int8_t err;
+      err_t err;
     } connected;
     struct {
-      int8_t err;
+      err_t err;
     } error;
     struct {
       tcp_pcb *pcb;
@@ -143,11 +143,11 @@ struct lwip_tcp_event_packet_t {
     struct {
       tcp_pcb *pcb;
       pbuf *pb;
-      int8_t err;
+      err_t err;
     } recv;
     struct {
       tcp_pcb *pcb;
-      int8_t err;
+      err_t err;
     } fin;
     struct {
       tcp_pcb *pcb;
@@ -171,11 +171,11 @@ public:
   static void __attribute__((visibility("internal"))) handle_async_event(lwip_tcp_event_packet_t *event);
 
   // LwIP TCP event callbacks that (will) require privileged access
-  static int8_t __attribute__((visibility("internal"))) tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb, int8_t err);
-  static int8_t __attribute__((visibility("internal"))) tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len);
-  static void __attribute__((visibility("internal"))) tcp_error(void *arg, int8_t err);
-  static int8_t __attribute__((visibility("internal"))) tcp_poll(void *arg, struct tcp_pcb *pcb);
-  static int8_t __attribute__((visibility("internal"))) tcp_accept(void *arg, tcp_pcb *pcb, int8_t err);
+  static err_t __attribute__((visibility("internal"))) tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb, err_t err);
+  static err_t __attribute__((visibility("internal"))) tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len);
+  static void __attribute__((visibility("internal"))) tcp_error(void *arg, err_t err);
+  static err_t __attribute__((visibility("internal"))) tcp_poll(void *arg, struct tcp_pcb *pcb);
+  static err_t __attribute__((visibility("internal"))) tcp_accept(void *arg, tcp_pcb *pcb, err_t err);
 };
 
 // Guard class for the global queue
@@ -205,15 +205,25 @@ static TaskHandle_t _async_service_task_handle = NULL;
 static SemaphoreHandle_t _slots_lock = NULL;
 static const int _number_of_closed_slots = CONFIG_LWIP_MAX_ACTIVE_TCP;
 static uint32_t _closed_slots[_number_of_closed_slots];
+static tcp_pcb *_pcb_slots[_number_of_closed_slots];
 static uint32_t _closed_index = []() {
   _slots_lock = xSemaphoreCreateBinary();
   configASSERT(_slots_lock);  // Add sanity check
   xSemaphoreGive(_slots_lock);
   for (int i = 0; i < _number_of_closed_slots; ++i) {
     _closed_slots[i] = 1;
+    _pcb_slots[i] = nullptr;
   }
   return 1;
 }();
+
+static inline bool _is_pcb_slot_valid(int8_t slot, tcp_pcb *pcb) {
+  bool valid;
+  xSemaphoreTake(_slots_lock, portMAX_DELAY);
+  valid = (slot > INVALID_CLOSED_SLOT && slot < _number_of_closed_slots && _pcb_slots[slot] == pcb);
+  xSemaphoreGive(_slots_lock);
+  return valid;
+}
 
 static void _free_event(lwip_tcp_event_packet_t *evpkt) {
   if ((evpkt->event == LWIP_TCP_RECV) && (evpkt->recv.pb != nullptr)) {
@@ -440,7 +450,7 @@ static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
   }
 }
 
-static int8_t _tcp_connected(void *arg, tcp_pcb *pcb, int8_t err) {
+static err_t _tcp_connected(void *arg, tcp_pcb *pcb, err_t err) {
   // ets_printf("+C: 0x%08x\n", pcb);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CONNECTED, client};
@@ -455,7 +465,7 @@ static int8_t _tcp_connected(void *arg, tcp_pcb *pcb, int8_t err) {
   return ERR_OK;
 }
 
-int8_t AsyncTCP_detail::tcp_poll(void *arg, struct tcp_pcb *pcb) {
+err_t AsyncTCP_detail::tcp_poll(void *arg, struct tcp_pcb *pcb) {
   // throttle polling events queueing when event queue is getting filled up, let it handle _onack's
   {
     queue_mutex_guard guard;
@@ -480,7 +490,10 @@ int8_t AsyncTCP_detail::tcp_poll(void *arg, struct tcp_pcb *pcb) {
   return ERR_OK;
 }
 
-int8_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb, int8_t err) {
+/**
+ * _lwip_fin --> _free_closed_slot --> _fin --> onDisconnect() --> ~AsyncClient()
+*/
+err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb, err_t err) {
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_RECV, client};
   if (!e) {
@@ -506,7 +519,7 @@ int8_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb
   return ERR_OK;
 }
 
-int8_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
+err_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
   // ets_printf("+S: 0x%08x\n", pcb);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_SENT, client};
@@ -522,9 +535,9 @@ int8_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
   return ERR_OK;
 }
 
-void AsyncTCP_detail::tcp_error(void *arg, int8_t err) {
+void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
   // ets_printf("+E: 0x%08x\n", arg);
-  ASYNC_TCP_CONSOLE("%u", arg);
+  ASYNC_TCP_CONSOLE("%u Connection aborted or reset, err = %d", arg, err);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   if (client && client->_pcb) {
     _reset_tcp_callbacks(client->_pcb, client);
@@ -575,7 +588,7 @@ typedef struct {
   struct tcpip_api_call_data call;
   tcp_pcb *pcb;
   int8_t closed_slot;
-  int8_t err;
+  err_t err;
   union {
     AsyncClient *close;
     struct {
@@ -600,7 +613,7 @@ typedef struct {
 static err_t _tcp_output_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
-  if (msg->closed_slot == INVALID_CLOSED_SLOT || !_closed_slots[msg->closed_slot]) {
+  if (_is_pcb_slot_valid(msg->closed_slot, msg->pcb)) {
     msg->err = tcp_output(msg->pcb);
   }
   return msg->err;
@@ -620,7 +633,7 @@ static esp_err_t _tcp_output(tcp_pcb *pcb, int8_t closed_slot) {
 static err_t _tcp_write_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
-  if (msg->closed_slot == INVALID_CLOSED_SLOT || !_closed_slots[msg->closed_slot]) {
+  if (_is_pcb_slot_valid(msg->closed_slot, msg->pcb)) {
     msg->err = tcp_write(msg->pcb, msg->write.data, msg->write.size, msg->write.apiflags);
   }
   return msg->err;
@@ -643,10 +656,8 @@ static esp_err_t _tcp_write(tcp_pcb *pcb, int8_t closed_slot, const char *data, 
 static err_t _tcp_recved_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
-  if (msg->closed_slot == INVALID_CLOSED_SLOT || !_closed_slots[msg->closed_slot]) {
-    // if(msg->closed_slot != INVALID_CLOSED_SLOT && !_closed_slots[msg->closed_slot]) {
-    // if(msg->closed_slot != INVALID_CLOSED_SLOT) {
-    msg->err = 0;
+  if (_is_pcb_slot_valid(msg->closed_slot, msg->pcb)) {
+    msg->err = ERR_OK;
     tcp_recved(msg->pcb, msg->received);
   }
   return msg->err;
@@ -667,7 +678,7 @@ static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len) {
 static err_t _tcp_close_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
-  if (msg->closed_slot == INVALID_CLOSED_SLOT || !_closed_slots[msg->closed_slot]) {
+  if (_is_pcb_slot_valid(msg->closed_slot, msg->pcb)) {
     // Unlike the other calls, this is not a direct wrapper of the LwIP function;
     // we perform the AsyncClient teardown interlocked safely with the LwIP task.
     _reset_tcp_callbacks(msg->pcb, msg->close);
@@ -694,7 +705,8 @@ static esp_err_t _tcp_close(tcp_pcb *pcb, int8_t closed_slot, AsyncClient *clien
 static err_t _tcp_abort_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
-  if (msg->closed_slot == INVALID_CLOSED_SLOT || !_closed_slots[msg->closed_slot]) {
+  if (_is_pcb_slot_valid(msg->closed_slot, msg->pcb)) {
+    msg->err = ERR_OK;
     tcp_abort(msg->pcb);
   }
   return msg->err;
@@ -872,6 +884,8 @@ bool AsyncClient::connect(ip_addr_t addr, uint16_t port) {
     return false;
   }
 
+  ASYNC_TCP_CONSOLE("%u port: %u", this, port);
+
   if (!_allocate_closed_slot()) {
     log_e("failed to allocate: closed slot full");
     return false;
@@ -887,13 +901,21 @@ bool AsyncClient::connect(ip_addr_t addr, uint16_t port) {
 #endif
     if (!pcb) {
       log_e("pcb == NULL");
+      _free_closed_slot();
       return false;
     }
     _bind_tcp_callbacks(pcb, this);
   }
 
   esp_err_t err = _tcp_connect(pcb, _closed_slot, &addr, port, (tcp_connected_fn)&_tcp_connected);
-  return err == ESP_OK;
+  bool result = (err == ESP_OK);
+  if (result) {
+    _pcb = pcb;
+    _allocate_closed_slot(); // update pcb into _pcb_slots[_closed_slot]
+  } else {
+    _free_closed_slot();
+  }
+  return result;
 }
 
 #ifdef ARDUINO
@@ -910,7 +932,7 @@ bool AsyncClient::connect(const IPAddress &ip, uint16_t port) {
 #else
   ip.to_ip_addr_t(&addr);
 #endif
-
+  ASYNC_TCP_CONSOLE("%u IP %s, port: %u", this, ip.toString().c_str(), port);
   return connect(addr, port);
 }
 #endif
@@ -926,6 +948,8 @@ bool AsyncClient::connect(const IPv6Address &ip, uint16_t port) {
 
 bool AsyncClient::connect(const char *host, uint16_t port) {
   ip_addr_t addr;
+
+  ASYNC_TCP_CONSOLE("%u host %s, port: %u", this, host, port);
 
   if (!_start_async_task()) {
     log_e("failed to start task");
@@ -959,6 +983,9 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
   return false;
 }
 
+/**
+ * _close(), _tcp_close(),  _free_closed_slot() --> onDisconnect() --> ~AsyncClient()
+*/
 void AsyncClient::close(bool now) {
   if (_pcb) {
     ASYNC_TCP_CONSOLE("%u", this);
@@ -967,7 +994,10 @@ void AsyncClient::close(bool now) {
   _close();
 }
 
-int8_t AsyncClient::abort() {
+/**
+ * _tcp_abort() --> tcp_error(), _free_closed_slot() --> _error() -->onDisconnect() --> ~AsyncClient()
+*/
+err_t AsyncClient::abort() {
   if (_pcb) {
     ASYNC_TCP_CONSOLE("%u", this);
     _tcp_abort(_pcb, _closed_slot);
@@ -992,7 +1022,7 @@ size_t AsyncClient::add(const char *data, size_t size, uint8_t apiflags) {
     return 0;
   }
   size_t will_send = (room < size) ? room : size;
-  int8_t err = ERR_OK;
+  err_t err = ERR_OK;
   err = _tcp_write(_pcb, _closed_slot, data, will_send, apiflags);
   if (err != ERR_OK) {
     return 0;
@@ -1033,9 +1063,9 @@ void AsyncClient::ackPacket(struct pbuf *pb) {
  * Main Private Methods
  * */
 
-int8_t AsyncClient::_close() {
+err_t AsyncClient::_close() {
   // ets_printf("X: 0x%08x\n", (uint32_t)this);
-  int8_t err = ERR_OK;
+  err_t err = ERR_OK;
   if (_pcb) {
     _tcp_close(_pcb, _closed_slot, this);
     _free_closed_slot();
@@ -1061,10 +1091,11 @@ bool AsyncClient::_allocate_closed_slot() {
         }
       }
       allocated = _closed_slot != INVALID_CLOSED_SLOT;
-      if (allocated) {
-        ASYNC_TCP_CONSOLE("%u: _closed_slot = %d, _closed_index = %u, ", this, _closed_slot, _closed_index);
-        _closed_slots[_closed_slot] = 0;
-      }
+    }
+    if (allocated) {
+      ASYNC_TCP_CONSOLE("%u: _closed_slot = %d, _closed_index = %u, ", this, _closed_slot, _closed_index);
+      _closed_slots[_closed_slot] = 0;
+      _pcb_slots[_closed_slot] = _pcb;
     }
     xSemaphoreGive(_slots_lock);
   }
@@ -1076,18 +1107,31 @@ void AsyncClient::_free_closed_slot() {
   if (_closed_slot != INVALID_CLOSED_SLOT) {
     ASYNC_TCP_CONSOLE("%u: _closed_slot = %d, _closed_index = %u, ", this, _closed_slot, _closed_index);
     _closed_slots[_closed_slot] = _closed_index;
+    _pcb_slots[_closed_slot] = nullptr;
     _closed_slot = INVALID_CLOSED_SLOT;
     ++_closed_index;
+    if (0 == _closed_index) {
+      ++_closed_index;
+    }
   }
   xSemaphoreGive(_slots_lock);
+}
+
+bool AsyncClient::valid() {
+  return _is_pcb_slot_valid(_closed_slot, _pcb);
 }
 
 /*
  * Private Callbacks
  * */
 
-int8_t AsyncClient::_connected(tcp_pcb *pcb, int8_t err) {
-  _pcb = reinterpret_cast<tcp_pcb *>(pcb);
+/**
+ * This callback for http client
+ * a callback when client connected to host successful
+ * bool AsyncClient::connect(ip_addr_t addr, uint16_t port)
+*/
+err_t AsyncClient::_connected(tcp_pcb *pcb, err_t err) {
+  ASYNC_TCP_CONSOLE("%u", this);
   if (_pcb) {
     _rx_last_packet = millis();
   }
@@ -1099,7 +1143,7 @@ int8_t AsyncClient::_connected(tcp_pcb *pcb, int8_t err) {
   return ERR_OK;
 }
 
-void AsyncClient::_error(int8_t err) {
+void AsyncClient::_error(err_t err) {
   if (_error_cb) {
     _error_cb(_error_cb_arg, this, err);
   }
@@ -1110,7 +1154,7 @@ void AsyncClient::_error(int8_t err) {
 }
 
 // In LwIP Thread
-int8_t AsyncClient::_lwip_fin(tcp_pcb *pcb, int8_t err) {
+err_t AsyncClient::_lwip_fin(tcp_pcb *pcb, err_t err) {
   if (!_pcb || pcb != _pcb) {
     log_d("0x%08" PRIx32 " != 0x%08" PRIx32, (uint32_t)pcb, (uint32_t)_pcb);
     return ERR_OK;
@@ -1126,7 +1170,7 @@ int8_t AsyncClient::_lwip_fin(tcp_pcb *pcb, int8_t err) {
 }
 
 // In Async Thread
-int8_t AsyncClient::_fin(tcp_pcb *pcb, int8_t err) {
+err_t AsyncClient::_fin(tcp_pcb *pcb, err_t err) {
   if (_discard_cb) {
     ASYNC_TCP_CONSOLE("%u: disconnect", this);
     _discard_cb(_discard_cb_arg, this);
@@ -1134,7 +1178,7 @@ int8_t AsyncClient::_fin(tcp_pcb *pcb, int8_t err) {
   return ERR_OK;
 }
 
-int8_t AsyncClient::_sent(tcp_pcb *pcb, uint16_t len) {
+err_t AsyncClient::_sent(tcp_pcb *pcb, uint16_t len) {
   _rx_last_ack = _rx_last_packet = millis();
   if (_sent_cb) {
     _sent_cb(_sent_cb_arg, this, len, (_rx_last_packet - _tx_last_packet));
@@ -1142,7 +1186,7 @@ int8_t AsyncClient::_sent(tcp_pcb *pcb, uint16_t len) {
   return ERR_OK;
 }
 
-int8_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, int8_t err) {
+err_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, err_t err) {
   while (pb != NULL) {
     _rx_last_packet = millis();
     // we should not ack before we assimilate the data
@@ -1167,7 +1211,7 @@ int8_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, int8_t err) {
   return ERR_OK;
 }
 
-int8_t AsyncClient::_poll(tcp_pcb *pcb) {
+err_t AsyncClient::_poll(tcp_pcb *pcb) {
   if (!_pcb) {
     // log_d("pcb is NULL");
     return ERR_OK;
@@ -1489,7 +1533,7 @@ bool AsyncClient::canSend() const {
   return space() > 0;
 }
 
-const char *AsyncClient::errorToString(int8_t error) {
+const char *AsyncClient::errorToString(err_t error) {
   switch (error) {
     case ERR_OK:         return "OK";
     case ERR_MEM:        return "Out of memory error";
@@ -1587,7 +1631,7 @@ void AsyncServer::begin() {
     log_e("failed to start task");
     return;
   }
-  int8_t err;
+  err_t err;
   {
     tcp_core_guard tcg;
 #if LWIP_IPV4 && LWIP_IPV6
@@ -1634,7 +1678,7 @@ void AsyncServer::end() {
 }
 
 // runs on LwIP thread
-int8_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, int8_t err) {
+err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
   if (!pcb) {
     log_e("_accept failed: pcb is NULL");
     return ERR_ABRT;
@@ -1678,7 +1722,7 @@ int8_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, int8_t err) {
   return ERR_OK;
 }
 
-int8_t AsyncServer::_accepted(AsyncClient *client) {
+err_t AsyncServer::_accepted(AsyncClient *client) {
   if (_connect_cb) {
     _connect_cb(_connect_cb_arg, client);
   }
