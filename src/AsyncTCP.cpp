@@ -438,11 +438,13 @@ static void _bind_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
 }
 
 static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
-  tcp_arg(pcb, NULL);
-  tcp_sent(pcb, NULL);
-  tcp_recv(pcb, NULL);
-  tcp_err(pcb, NULL);
-  tcp_poll(pcb, NULL, 0);
+  if (pcb) {
+    tcp_arg(pcb, NULL);
+    tcp_sent(pcb, NULL);
+    tcp_recv(pcb, NULL);
+    tcp_err(pcb, NULL);
+    tcp_poll(pcb, NULL, 0);
+  }
   if (client) {
     _remove_events_for_client(client);
   }
@@ -538,7 +540,7 @@ void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
   ASYNC_TCP_CONSOLE("%u Connection aborted or reset, err = %d", arg, err);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   if (client && client->_pcb) {
-    _reset_tcp_callbacks(client->_pcb, client);
+    _reset_tcp_callbacks(nullptr, client); // avoid attach reset callback with pcb terminated
     client->_pcb = nullptr;
     client->_free_closed_slot();
   }
