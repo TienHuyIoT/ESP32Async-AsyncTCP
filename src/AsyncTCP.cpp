@@ -305,7 +305,6 @@ static void _remove_events_for_client(AsyncClient *client) {
   }
 };
 
-#if (defined ASYNC_TCP_CALLBACK_IMPL) && (ASYNC_TCP_CALLBACK_IMPL == 1)
 void asynctcp_callback(asynctcp_callback_fn function, void *ctx) {
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CALLBACK, nullptr};
   if (!e) {
@@ -318,7 +317,6 @@ void asynctcp_callback(asynctcp_callback_fn function, void *ctx) {
   queue_mutex_guard guard;
   _send_async_event(e);
 }
-#endif
 
 void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
   if (e->client == NULL) {
@@ -987,22 +985,44 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
  * _close(), _tcp_close(),  _free_closed_slot() --> onDisconnect() --> ~AsyncClient()
 */
 void AsyncClient::close(bool now) {
-  if (_pcb) {
-    ASYNC_TCP_CONSOLE("%u", this);
-    _tcp_recved(_pcb, _closed_slot, _rx_ack_len);
+  if (!_is_pcb_slot_valid(_closed_slot, _pcb)) {
+    return;
   }
-  _close();
+
+  if (now) {
+    if (_pcb) {
+      ASYNC_TCP_CONSOLE("%u", this);
+      _tcp_recved(_pcb, _closed_slot, _rx_ack_len);
+    }
+    _close();
+  } else {
+    asynctcp_callback([](void *arg) {
+      AsyncClient *client = (AsyncClient *)arg;
+      if (client->_pcb) {
+        ASYNC_TCP_CONSOLE("%u", client);
+        _tcp_recved(client->_pcb, client->_closed_slot, client->_rx_ack_len);
+      }
+      client->_close();
+    }, this);
+  }
 }
 
 /**
  * _tcp_abort() --> tcp_error(), _free_closed_slot() --> _error() -->onDisconnect() --> ~AsyncClient()
 */
 err_t AsyncClient::abort() {
-  if (_pcb) {
-    ASYNC_TCP_CONSOLE("%u", this);
-    _tcp_abort(_pcb, _closed_slot);
-    _pcb = NULL;
+  if (!_is_pcb_slot_valid(_closed_slot, _pcb)) {
+    return ERR_ABRT;
   }
+
+  asynctcp_callback([](void *arg) {
+    AsyncClient *client = (AsyncClient *)arg;
+    if (client->_pcb) {
+      ASYNC_TCP_CONSOLE("%u", client);
+      _tcp_abort(client->_pcb, client->_closed_slot);
+      client->_pcb = NULL;
+    }
+  }, this);
   return ERR_ABRT;
 }
 
