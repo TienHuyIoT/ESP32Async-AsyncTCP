@@ -53,7 +53,7 @@ extern "C" {
 #include "esp_task_wdt.h"
 #endif
 
-#define ASYNC_TCP_CONSOLE(f_, ...)  Serial.printf_P(PSTR("[AsyncTCP] %s() line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
+#define ASYNC_TCP_CONSOLE(f_, ...)  //Serial.printf_P(PSTR("[AsyncTCP] %s() line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
 
 
 // Required for:
@@ -108,7 +108,6 @@ struct tcp_core_guard {
  * TCP/IP API Calls private prototype
  * */
 static esp_err_t _tcp_bind_callback(tcp_pcb *pcb, AsyncClient *client) ;
-static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len);
 static err_t _tcp_output(struct tcpip_api_call_data *api_call_msg);
 static esp_err_t _tcp_write(tcp_pcb *pcb, int8_t closed_slot, const char *data, size_t size, uint8_t apiflags);
 static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len);
@@ -249,9 +248,9 @@ static inline bool _is_pcb_slot_valid(int8_t slot, tcp_pcb *pcb) {
 
 static void _free_event(lwip_tcp_event_packet_t *evpkt) {
   if ((evpkt->event == LWIP_TCP_RECV) && (evpkt->recv.pb != nullptr)) {
-    if (_tcp_recved(evpkt->recv.pcb, evpkt->client->closedSlot(), evpkt->recv.pb->tot_len) == ERR_OK) {
-      pbuf_free(evpkt->recv.pb);
-    }
+    ASYNC_TCP_CONSOLE("Free ev: client %u slot = %d pb = %u", evpkt->client, evpkt->client->closedSlot(), evpkt->recv.pb);
+    _tcp_recved(evpkt->recv.pcb, evpkt->client->closedSlot(), evpkt->recv.pb->tot_len);
+    pbuf_free(evpkt->recv.pb);  // always free buffer
   }
   delete evpkt;
 }
@@ -513,18 +512,40 @@ err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb,
   }
   if (pb) {
     if (err != ERR_OK || pb->tot_len == 0) {
-        pbuf_free(pb);
-        ASYNC_TCP_CONSOLE("err = %d", err);
-        return ERR_OK;
+      pbuf_free(pb);
+      ASYNC_TCP_CONSOLE("err = %d", err);
+      return ERR_OK;
     }
 
     ASYNC_TCP_CONSOLE("pb = %u tot_len = %u len = %u ref = %u", pb, pb->tot_len, pb->len, pb->ref);
-    // Increase pbuf ref count before queueing
-    // pbuf_ref(pb);
     // ets_printf("+R: 0x%08x\n", pcb);
     e->recv.pcb = pcb;
     e->recv.pb = pb;
     e->recv.err = err;
+
+#if (ASYNC_TCP_RECVED_IN_LWIP == 1)
+    e->recv.pb = pbuf_alloc(PBUF_RAW, pb->tot_len, PBUF_RAM);
+    if (e->recv.pb) {
+      e->recv.err = pbuf_copy(e->recv.pb, pb);
+      if (e->recv.err == ERR_OK) {
+        ASYNC_TCP_CONSOLE("Copied pbuf: %d bytes", e->recv.pb->tot_len);
+      } else {
+        ASYNC_TCP_CONSOLE("pbuf_copy failed or no memory");
+        pbuf_free(e->recv.pb);
+        e->recv.pb = nullptr;
+      }
+    } else {
+      ASYNC_TCP_CONSOLE("pbuf_alloc failed");
+      e->recv.err = ERR_BUF;
+    }
+    tcp_recved(pcb, pb->tot_len);
+    pbuf_free(pb);  // free the original reference
+
+    if (e->recv.err != ERR_OK) {
+      e->event = LWIP_TCP_FIN;
+      client->_lwip_fin(e->fin.pcb, e->fin.err);
+    }
+#endif
   } else {
     // ets_printf("+F: 0x%08x\n", pcb);
     e->event = LWIP_TCP_FIN;
@@ -560,9 +581,9 @@ void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
   ASYNC_TCP_CONSOLE("%u Connection aborted or reset, err = %d", arg, err);
   AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
   if (client && client->_pcb) {
-    _reset_tcp_callbacks(nullptr, client); // avoid attach reset callback with pcb terminated
-    client->_pcb = nullptr;
     client->_free_closed_slot();
+    client->_pcb = nullptr;
+    _reset_tcp_callbacks(nullptr, client); // avoid attach reset callback with pcb terminated
   }
 
   // enqueue event to be processed in the async task for the user callback
@@ -712,6 +733,9 @@ static err_t _tcp_recved_api(struct tcpip_api_call_data *api_call_msg) {
 }
 
 static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len) {
+#if (ASYNC_TCP_RECVED_IN_LWIP == 1)
+  return ERR_OK;
+#else
   if (!pcb) {
     return ERR_CONN;
   }
@@ -721,6 +745,7 @@ static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len) {
   msg.received = len;
   tcpip_api_call(_tcp_recved_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
+#endif
 }
 
 static err_t _tcp_close_api(struct tcpip_api_call_data *api_call_msg) {
@@ -898,13 +923,13 @@ AsyncClient::AsyncClient(tcp_pcb *pcb)
       _close();
       ASYNC_TCP_CONSOLE("Allocate %u failure", this);
     } else {
-      ASYNC_TCP_CONSOLE("Allocate %u succeed", this);
+      ASYNC_TCP_CONSOLE("Allocate %u  _closed_slot[%d] succeed", this, _closed_slot);
     }
   }
 }
 
 AsyncClient::~AsyncClient() {
-  ASYNC_TCP_CONSOLE("Deallocate %u", this);
+  ASYNC_TCP_CONSOLE("Deallocate client %u _closed_slot[%d]", this, _closed_slot);
   if (_pcb) {
     ASYNC_TCP_CONSOLE("%u: close", this);
     _close();
