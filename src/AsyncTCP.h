@@ -269,6 +269,9 @@ public:
   tcp_pcb *pcb() {
     return _pcb;
   }
+  int8_t closedSlot() {
+    return _closed_slot;
+  }
 
 protected:
   friend class AsyncTCP_detail;
