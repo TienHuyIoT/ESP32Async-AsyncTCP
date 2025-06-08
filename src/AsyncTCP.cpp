@@ -251,8 +251,7 @@ static inline bool _is_pcb_slot_valid(int8_t slot, tcp_pcb *pcb) {
 static void _free_event(lwip_tcp_event_packet_t *evpkt) {
   if ((evpkt->event == LWIP_TCP_RECV) && (evpkt->recv.pb != nullptr)) {
     ASYNC_TCP_CONSOLE("Free ev: client %u slot = %d pb = %u", evpkt->client, evpkt->client->closedSlot(), evpkt->recv.pb);
-    _tcp_recved(evpkt->recv.pcb, evpkt->client->closedSlot(), evpkt->recv.pb->tot_len);
-    pbuf_free(evpkt->recv.pb);  // always free buffer
+    pbuf_free(evpkt->recv.pb);
   }
   delete evpkt;
 }
@@ -460,6 +459,50 @@ static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
   if (client) {
     _remove_events_for_client(client);
   }
+}
+
+err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
+  if (!pcb) {
+    log_e("_accept failed: pcb is NULL");
+    return ERR_ABRT;
+  }
+  auto server = reinterpret_cast<AsyncServer *>(arg);
+  if (server->_connect_cb) {
+    AsyncClient *c = new (std::nothrow) AsyncClient(pcb);
+    if (c && c->pcb()) {
+      c->setNoDelay(server->_noDelay);
+
+      lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_ACCEPT, c};
+      if (e) {
+        e->accept.server = server;
+
+        queue_mutex_guard guard;
+        _prepend_async_event(e);
+        return ERR_OK;  // success
+      }
+
+      // Couldn't allocate accept event
+      // We can't let the client object call in to close, as we're on the LWIP thread; it could deadlock trying to RPC to itself
+      // c->_pcb = nullptr;
+      // tcp_abort(pcb);
+      delete c;
+      log_e("_accept failed: couldn't accept client");
+      return ERR_OK; // due to delete client used tcp_close()
+    }
+    if (c) {
+      // Couldn't complete setup
+      // pcb has already been aborted
+      delete c;
+      // pcb = nullptr;
+      log_e("_accept failed: couldn't complete setup");
+      return ERR_OK;  // due to delete client used tcp_close()
+    }
+    log_e("_accept failed: couldn't allocate client");
+  } else {
+    log_e("_accept failed: no onConnect callback");
+  }
+  tcp_abort(pcb);
+  return ERR_ABRT; // Always return ERR_ABRT after calling tcp_abort(). Otherwise, lwIP may misbehave.
 }
 
 err_t AsyncTCP_detail::tcp_connected(void *arg, tcp_pcb *pcb, err_t err) {
@@ -735,9 +778,6 @@ static err_t _tcp_recved_api(struct tcpip_api_call_data *api_call_msg) {
 }
 
 static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len) {
-#if (ASYNC_TCP_RECVED_IN_LWIP == 1)
-  return ERR_OK;
-#else
   if (!pcb) {
     return ERR_CONN;
   }
@@ -747,7 +787,6 @@ static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len) {
   msg.received = len;
   tcpip_api_call(_tcp_recved_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
-#endif
 }
 
 static err_t _tcp_close_api(struct tcpip_api_call_data *api_call_msg) {
@@ -1115,19 +1154,11 @@ void AsyncClient::close(bool now) {
   }
 
   if (now) {
-    if (_pcb && _rx_ack_len) {
-      ASYNC_TCP_CONSOLE("%u", this);
-      _tcp_recved(_pcb, _closed_slot, _rx_ack_len);
-    }
-    _close();
+    _close(); // run in lwIP thread 
   } else {
     asynctcp_callback([](void *arg) {
       AsyncClient *client = (AsyncClient *)arg;
-      if (client->_pcb && client->_rx_ack_len) {
-        ASYNC_TCP_CONSOLE("%u", client);
-        _tcp_recved(client->_pcb, client->_closed_slot, client->_rx_ack_len);
-      }
-      client->_close();
+      client->_close(); // run in Async thread 
     }, this);
   }
 }
@@ -1186,9 +1217,6 @@ size_t AsyncClient::ack(size_t len) {
   if (len > _rx_ack_len) {
     len = _rx_ack_len;
   }
-  if (len) {
-    _tcp_recved(_pcb, _closed_slot, len);
-  }
   _rx_ack_len -= len;
   return len;
 }
@@ -1197,9 +1225,7 @@ void AsyncClient::ackPacket(struct pbuf *pb) {
   if (!pb) {
     return;
   }
-  if (_tcp_recved(_pcb, _closed_slot, pb->len) == ERR_OK) {
-    pbuf_free(pb);
-  }
+  pbuf_free(pb);
 }
 
 /*
@@ -1347,8 +1373,6 @@ err_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, err_t err) {
       }
       if (!_ack_pcb) {
         _rx_ack_len += b->len;
-      } else if (_pcb) {
-        _tcp_recved(_pcb, _closed_slot, b->len);
       }
       pbuf_free(b);
     }
@@ -1829,51 +1853,6 @@ void AsyncServer::end() {
       server->_pcb = NULL;
     }
   }, this);
-}
-
-// runs on LwIP thread
-err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
-  if (!pcb) {
-    log_e("_accept failed: pcb is NULL");
-    return ERR_ABRT;
-  }
-  auto server = reinterpret_cast<AsyncServer *>(arg);
-  if (server->_connect_cb) {
-    AsyncClient *c = new (std::nothrow) AsyncClient(pcb);
-    if (c && c->pcb()) {
-      c->setNoDelay(server->_noDelay);
-
-      lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_ACCEPT, c};
-      if (e) {
-        e->accept.server = server;
-
-        queue_mutex_guard guard;
-        _prepend_async_event(e);
-        return ERR_OK;  // success
-      }
-
-      // Couldn't allocate accept event
-      // We can't let the client object call in to close, as we're on the LWIP thread; it could deadlock trying to RPC to itself
-      // c->_pcb = nullptr;
-      // tcp_abort(pcb);
-      delete c;
-      log_e("_accept failed: couldn't accept client");
-      return ERR_ABRT;
-    }
-    if (c) {
-      // Couldn't complete setup
-      // pcb has already been aborted
-      delete c;
-      // pcb = nullptr;
-      log_e("_accept failed: couldn't complete setup");
-      return ERR_ABRT;
-    }
-    log_e("_accept failed: couldn't allocate client");
-  } else {
-    log_e("_accept failed: no onConnect callback");
-  }
-  tcp_abort(pcb);
-  return ERR_OK;
 }
 
 err_t AsyncServer::_accepted(AsyncClient *client) {
