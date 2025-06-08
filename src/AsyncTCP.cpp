@@ -227,6 +227,7 @@ static SemaphoreHandle_t _slots_lock = NULL;
 static const int _number_of_closed_slots = CONFIG_LWIP_MAX_ACTIVE_TCP;
 static uint32_t _closed_slots[_number_of_closed_slots];
 static tcp_pcb *_pcb_slots[_number_of_closed_slots];
+static AsyncClient *_client_slots[_number_of_closed_slots];
 static uint32_t _closed_index = []() {
   _slots_lock = xSemaphoreCreateBinary();
   configASSERT(_slots_lock);  // Add sanity check
@@ -234,6 +235,7 @@ static uint32_t _closed_index = []() {
   for (int i = 0; i < _number_of_closed_slots; ++i) {
     _closed_slots[i] = 1;
     _pcb_slots[i] = nullptr;
+    _client_slots[i] = nullptr;
   }
   return 1;
 }();
@@ -1113,7 +1115,7 @@ void AsyncClient::close(bool now) {
   }
 
   if (now) {
-    if (_pcb) {
+    if (_pcb && _rx_ack_len) {
       ASYNC_TCP_CONSOLE("%u", this);
       _tcp_recved(_pcb, _closed_slot, _rx_ack_len);
     }
@@ -1121,7 +1123,7 @@ void AsyncClient::close(bool now) {
   } else {
     asynctcp_callback([](void *arg) {
       AsyncClient *client = (AsyncClient *)arg;
-      if (client->_pcb) {
+      if (client->_pcb && client->_rx_ack_len) {
         ASYNC_TCP_CONSOLE("%u", client);
         _tcp_recved(client->_pcb, client->_closed_slot, client->_rx_ack_len);
       }
@@ -1222,25 +1224,24 @@ err_t AsyncClient::_close() {
 
 bool AsyncClient::_allocate_closed_slot() {
   bool allocated = false;
-  if (xSemaphoreTake(_slots_lock, portMAX_DELAY) == pdTRUE) {
-    uint32_t closed_slot_min_index = 0;
-    allocated = _closed_slot != INVALID_CLOSED_SLOT;
-    if (!allocated) {
-      for (int i = 0; i < _number_of_closed_slots; ++i) {
-        if ((_closed_slot == INVALID_CLOSED_SLOT || _closed_slots[i] <= closed_slot_min_index) && _closed_slots[i] != 0) {
-          closed_slot_min_index = _closed_slots[i];
-          _closed_slot = i;
-        }
+  xSemaphoreTake(_slots_lock, portMAX_DELAY);
+  uint32_t closed_slot_min_index = 0;
+  allocated = _closed_slot != INVALID_CLOSED_SLOT;
+  if (!allocated) {
+    for (int i = 0; i < _number_of_closed_slots; ++i) {
+      if ((_closed_slot == INVALID_CLOSED_SLOT || _closed_slots[i] <= closed_slot_min_index) && _closed_slots[i] != 0) {
+        closed_slot_min_index = _closed_slots[i];
+        _closed_slot = i;
       }
-      allocated = _closed_slot != INVALID_CLOSED_SLOT;
     }
-    if (allocated) {
-      if(_pcb) ASYNC_TCP_CONSOLE("client %u: _closed_slot[%d] = 0", this, _closed_slot);
-      _closed_slots[_closed_slot] = 0;
-      _pcb_slots[_closed_slot] = _pcb;
-    }
-    xSemaphoreGive(_slots_lock);
+    allocated = _closed_slot != INVALID_CLOSED_SLOT;
   }
+  if (allocated) {
+    if(_pcb) ASYNC_TCP_CONSOLE("client %u: _closed_slot[%d] = 0", this, _closed_slot);
+    _closed_slots[_closed_slot] = 0;
+    _pcb_slots[_closed_slot] = _pcb;
+  }
+  xSemaphoreGive(_slots_lock);
   return allocated;
 }
 
@@ -1334,7 +1335,7 @@ err_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, err_t err) {
   while (pb != NULL) {
     _rx_last_packet = millis();
     // we should not ack before we assimilate the data
-    _ack_pcb = true;
+    // _ack_pcb = true; // It is always true with whenever new client established. It should not force true here due to the ackLater() will not be valid anymore
     pbuf *b = pb;
     pb = b->next;
     b->next = NULL;
@@ -1347,10 +1348,9 @@ err_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, err_t err) {
       if (!_ack_pcb) {
         _rx_ack_len += b->len;
       } else if (_pcb) {
-        if (_tcp_recved(_pcb, _closed_slot, b->len) == ERR_OK) {
-          pbuf_free(b);
-        }
+        _tcp_recved(_pcb, _closed_slot, b->len);
       }
+      pbuf_free(b);
     }
   }
   return ERR_OK;
