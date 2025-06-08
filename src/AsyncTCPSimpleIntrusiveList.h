@@ -42,6 +42,7 @@ public:
 
   inline void push_back(value_ptr_type obj) {
     if (obj) {
+      obj->next = nullptr;  // Ensure null-termination
       *_tail = obj;
       _tail = &obj->next;
       ++_size;
@@ -50,11 +51,11 @@ public:
 
   inline void push_front(value_ptr_type obj) {
     if (obj) {
-      if (_head == nullptr) {
-        _tail = &obj->next;
-      }
       obj->next = _head;
       _head = obj;
+      if (obj->next == nullptr) {
+        _tail = &obj->next;
+      }
       ++_size;
     }
   }

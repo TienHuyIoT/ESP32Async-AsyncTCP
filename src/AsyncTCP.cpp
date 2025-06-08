@@ -315,14 +315,12 @@ static void _remove_events_for_client(AsyncClient *client) {
   lwip_tcp_event_packet_t *removed_event_chain;
   {
     queue_mutex_guard guard;
-    removed_event_chain = _async_queue.remove_if([=](lwip_tcp_event_packet_t &pkt) {
+    removed_event_chain = _async_queue.remove_if([client](lwip_tcp_event_packet_t &pkt) {
       return pkt.client == client;
     });
   }
 
-  size_t count = 0;
   while (removed_event_chain) {
-    ++count;
     auto t = removed_event_chain;
     removed_event_chain = t->next;
     _free_event(t);
