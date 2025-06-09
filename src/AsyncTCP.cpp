@@ -96,7 +96,7 @@ struct tcp_core_guard {
 #endif  // CONFIG_LWIP_TCPIP_CORE_LOCKING
 }  // anonymous namespace
 
-#define INVALID_CLOSED_SLOT -1
+#define INVALID_CLOSED_SLOT (s8_t)(-1)
 
 /*
   TCP poll interval is specified in terms of the TCP coarse timer interval, which is called twice a second
@@ -129,6 +129,7 @@ static void _do_discard_client(void *r, AsyncClient *c);
  * */
 
 typedef enum {
+  LWIP_TCP_NONE,
   LWIP_TCP_SENT,
   LWIP_TCP_RECV,
   LWIP_TCP_FIN,
@@ -239,6 +240,64 @@ static uint32_t _closed_index = []() {
   }
   return 1;
 }();
+
+// Helper: Register and Unregister Clients
+static AsyncClient *_clients[CONFIG_LWIP_MAX_ACTIVE_TCP];
+static SemaphoreHandle_t _client_mutex;
+
+s8_t _client_slot_available() {
+  s8_t slot = INVALID_CLOSED_SLOT;
+  xSemaphoreTake(_client_mutex, portMAX_DELAY);
+  for (u8_t i = 0; i < CONFIG_LWIP_MAX_ACTIVE_TCP; ++i) {
+    if (!_clients[i]) {
+      slot = i;
+      break;
+    }
+  }
+  xSemaphoreGive(_client_mutex);
+  return slot;
+}
+
+s8_t _register_client_slot(AsyncClient *client) {
+  s8_t slot = INVALID_CLOSED_SLOT;
+  xSemaphoreTake(_client_mutex, portMAX_DELAY);
+  for (u8_t i = 0; i < CONFIG_LWIP_MAX_ACTIVE_TCP; ++i) {
+    if (!_clients[i]) {
+      _clients[i] = client;
+      slot = i;
+      break;
+    }
+  }
+  xSemaphoreGive(_client_mutex);
+  return slot;
+}
+
+s8_t _unregister_client_slot(AsyncClient *client) {
+  s8_t slot = INVALID_CLOSED_SLOT;
+  xSemaphoreTake(_client_mutex, portMAX_DELAY);
+  for (u8_t i = 0; i < CONFIG_LWIP_MAX_ACTIVE_TCP; ++i) {
+    if (_clients[i] == client) {
+      _clients[i] = NULL;
+      slot = i;
+      break;
+    }
+  }
+  xSemaphoreGive(_client_mutex);
+  return slot;
+}
+
+bool _is_client_valid(AsyncClient *client) {
+  bool valid = false;
+  xSemaphoreTake(_client_mutex, portMAX_DELAY);
+  for (u8_t i = 0; i < CONFIG_LWIP_MAX_ACTIVE_TCP; ++i) {
+    if (_clients[i] == client) {
+      valid = true;
+      break;
+    }
+  }
+  xSemaphoreGive(_client_mutex);
+  return valid;
+}
 
 static inline bool _is_pcb_slot_valid(int8_t slot, tcp_pcb *pcb) {
   bool valid;
@@ -460,10 +519,15 @@ static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
 }
 
 err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
-  if (!pcb) {
-    log_e("_accept failed: pcb is NULL");
-    return ERR_ABRT;
+  if (err != ERR_OK || pcb == NULL) {
+    log_e("Accept error: %d", err);
+    if (pcb) {
+      tcp_abort(pcb);
+      return ERR_ABRT;  // correct after aborting
+    }
+    return ERR_MEM;  // Didn't abort anything, just report resource issue
   }
+
   auto server = reinterpret_cast<AsyncServer *>(arg);
   if (server->_connect_cb) {
     AsyncClient *c = new (std::nothrow) AsyncClient(pcb);
@@ -950,7 +1014,7 @@ void asynctcp_callback(asynctcp_callback_fn function, void *ctx) {
 }
 
 AsyncClient::AsyncClient(tcp_pcb *pcb)
-  : _connect_cb(0), _connect_cb_arg(0), _discard_cb(_do_discard_client), _discard_cb_arg(0), _sent_cb(0), _sent_cb_arg(0), _error_cb(0), _error_cb_arg(0), _recv_cb(0),
+  : _connect_cb(0), _connect_cb_arg(0), _discard_cb(0), _discard_cb_arg(0), _sent_cb(0), _sent_cb_arg(0), _error_cb(0), _error_cb_arg(0), _recv_cb(0),
     _recv_cb_arg(0), _pb_cb(0), _pb_cb_arg(0), _timeout_cb(0), _timeout_cb_arg(0), _poll_cb(0), _poll_cb_arg(0), _ack_pcb(true), _tx_last_packet(0),
     _rx_timeout(0), _rx_last_ack(0), _rx_ack_len(0), _ack_timeout(CONFIG_ASYNC_TCP_MAX_ACK_TIME), _connect_port(0) {
   _pcb = pcb;
