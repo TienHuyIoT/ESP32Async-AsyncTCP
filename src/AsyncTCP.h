@@ -67,6 +67,7 @@ extern "C" {
 #endif
 #define ASYNC_TCP_RECVED_IN_LWIP 1
 
+class AsyncServer;
 class AsyncClient;
 
 #define ASYNC_WRITE_FLAG_COPY 0x01  // will allocate new buffer to hold the data while sending (else will hold reference to the data given)
@@ -88,7 +89,7 @@ class AsyncTCP_detail;
 
 class AsyncClient {
 public:
-  AsyncClient(tcp_pcb *pcb = 0);
+  AsyncClient(tcp_pcb *pcb = nullptr, AsyncServer *server = nullptr);
   ~AsyncClient();
 
   // Noncopyable
@@ -274,11 +275,15 @@ public:
     return _closed_slot;
   }
 
+  // internal handle in LwIP thread;
+  tcp_pcb *_pcb;
+  bool _is_valid;
+
 protected:
   friend class AsyncTCP_detail;
   friend class AsyncServer;
 
-  tcp_pcb *_pcb;
+  AsyncServer *_server;
   int8_t _closed_slot;
 
   AcConnectHandler _connect_cb;
@@ -310,7 +315,7 @@ protected:
   err_t _close();
   void _free_closed_slot();
   bool _allocate_closed_slot();
-  err_t _connected(tcp_pcb *pcb, err_t err);
+  err_t _connected(tcp_pcb *pcb);
   void _error(err_t err);
   err_t _poll(tcp_pcb *pcb);
   err_t _sent(tcp_pcb *pcb, uint16_t len);
@@ -344,7 +349,7 @@ protected:
   ip_addr_t _addr;
   bool _noDelay;
   tcp_pcb *_pcb;
-  AcConnectHandler _connect_cb;
+  AcConnectHandler _listen_connect_cb;
   void *_connect_cb_arg;
 
   err_t _accept(tcp_pcb *newpcb, err_t err);

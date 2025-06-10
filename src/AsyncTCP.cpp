@@ -113,8 +113,8 @@ static esp_err_t _tcp_write(tcp_pcb *pcb, int8_t closed_slot, const char *data, 
 static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t closed_slot, size_t len);
 static esp_err_t _tcp_close(tcp_pcb *pcb, int8_t closed_slot, AsyncClient *client);
 static esp_err_t _tcp_abort(tcp_pcb *pcb, int8_t closed_slot);
-static esp_err_t _tcp_connect(tcp_pcb *pcb, int8_t closed_slot, ip_addr_t *addr, uint16_t port, tcp_connected_fn cb);
-static esp_err_t _dns_gethostbyname(const char *hostname, ip_addr_t *addr, dns_found_callback found, void *callback_arg);
+static esp_err_t _tcp_connect(tcp_pcb *pcb, int8_t closed_slot, ip_addr_t *addr, uint16_t port, tcp_connected_fn cb, void *arg);
+static esp_err_t _dns_gethostbyname(const char *hostname, ip_addr_t *addr, dns_found_callback found, void *arg);
 static tcp_pcb *_tcp_new_ip_type(u8_t type);
 static esp_err_t _tcp_bind(tcp_pcb *pcb, ip_addr_t *addr, uint16_t port);
 static tcp_pcb *_tcp_listen_with_backlog(tcp_pcb *pcb, uint8_t backlog);
@@ -198,6 +198,7 @@ public:
   static err_t __attribute__((visibility("internal"))) tcp_poll(void *arg, struct tcp_pcb *pcb);
   static err_t __attribute__((visibility("internal"))) tcp_accept(void *arg, tcp_pcb *pcb, err_t err);
   static err_t __attribute__((visibility("internal"))) tcp_connected(void *arg, tcp_pcb *pcb, err_t err) ;
+  static void __attribute__((visibility("internal"))) _tcp_dns_found(const char *name, const ip_addr_t *ipaddr, void *arg);
 };
 
 // Guard class for the global queue
@@ -411,7 +412,7 @@ void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
     e->client->_error(e->error.err);
   } else if (e->event == LWIP_TCP_CONNECTED) {
     // ets_printf("C: 0x%08x 0x%08x %d\n", e->client, e->connected.pcb, e->connected.err);
-    e->client->_connected(e->connected.pcb, e->connected.err);
+    e->client->_connected(e->connected.pcb);
   } else if (e->event == LWIP_TCP_ACCEPT) {
     // ets_printf("A: 0x%08x 0x%08x\n", e->client, e->accept.client);
     e->accept.server->_accepted(e->client);
@@ -497,6 +498,7 @@ static bool _start_async_task() {
  * LwIP Callbacks
  * */
 
+ // For safe: only run in LwIP callbacks or TPC/IP raw API tcpip_api_call and tcpip_callback
 static void _bind_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
   tcp_arg(pcb, client);
   tcp_recv(pcb, &AsyncTCP_detail::tcp_recv);
@@ -505,6 +507,7 @@ static void _bind_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
   tcp_poll(pcb, &AsyncTCP_detail::tcp_poll, CONFIG_ASYNC_TCP_POLL_TIMER);
 }
 
+// For safe: only run in LwIP callbacks or TPC/IP raw API tcpip_api_call and tcpip_callback
 static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
   if (pcb) {
     tcp_arg(pcb, NULL);
@@ -514,71 +517,70 @@ static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
     tcp_poll(pcb, NULL, 0);
   }
   if (client) {
-    _remove_events_for_client(client);
+    _remove_events_for_client(client); // Should check run in/out side which is better
   }
 }
 
+// TCP Server: listen pcb callback
 err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
-  if (err != ERR_OK || pcb == NULL) {
-    log_e("Accept error: %d", err);
+#if (1)
+  AsyncServer *s = reinterpret_cast<AsyncServer *>(arg);
+  AsyncClient *c = (ERR_OK == err && pcb && s) ? new (std::nothrow) AsyncClient(pcb) : nullptr;
+  lwip_tcp_event_packet_t *e = (c) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_ACCEPT, c} : nullptr;
+  s8_t slot = (e) ? _register_client_slot(c) : INVALID_CLOSED_SLOT;
+  bool accepted = (slot != INVALID_CLOSED_SLOT && s->_listen_connect_cb) ? true : false;
+#endif
+
+  if (accepted) {
+    log_e("Accept failed: %d", err);
+
+    if (e) {
+      delete e;
+    }
+    
+    if (c) {
+      delete c;
+    }
+
+    if (slot != INVALID_CLOSED_SLOT) {
+      _unregister_client_slot(c);
+    }
+
     if (pcb) {
       tcp_abort(pcb);
+      // https://github.com/espressif/esp-lwip/blob/master/src/core/tcp.c#L636
       return ERR_ABRT;  // correct after aborting
     }
     return ERR_MEM;  // Didn't abort anything, just report resource issue
   }
-
-  auto server = reinterpret_cast<AsyncServer *>(arg);
-  if (server->_connect_cb) {
-    AsyncClient *c = new (std::nothrow) AsyncClient(pcb);
-    if (c && c->pcb()) {
-      c->setNoDelay(server->_noDelay);
-
-      lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_ACCEPT, c};
-      if (e) {
-        e->accept.server = server;
-
-        queue_mutex_guard guard;
-        _prepend_async_event(e);
-        return ERR_OK;  // success
-      }
-
-      // Couldn't allocate accept event
-      // We can't let the client object call in to close, as we're on the LWIP thread; it could deadlock trying to RPC to itself
-      // c->_pcb = nullptr;
-      // tcp_abort(pcb);
-      delete c;
-      log_e("_accept failed: couldn't accept client");
-      return ERR_OK; // due to delete client used tcp_close()
-    }
-    if (c) {
-      // Couldn't complete setup
-      // pcb has already been aborted
-      delete c;
-      // pcb = nullptr;
-      log_e("_accept failed: couldn't complete setup");
-      return ERR_OK;  // due to delete client used tcp_close()
-    }
-    log_e("_accept failed: couldn't allocate client");
-  } else {
-    log_e("_accept failed: no onConnect callback");
-  }
-  tcp_abort(pcb);
-  return ERR_ABRT; // Always return ERR_ABRT after calling tcp_abort(). Otherwise, lwIP may misbehave.
+  
+  queue_mutex_guard guard;
+  c->_is_valid = true;
+  e->client = c;
+  e->accept.server = s;
+  _bind_tcp_callbacks(pcb, c);
+  _prepend_async_event(e);
+  return ERR_OK;
 }
 
+/**
+ * TCP Client: connection callback
+ * Do not need to call tcp_abort(pcb).
+ * Just only need to return error status and leave the _tcp_connect_api handle.
+*/
 err_t AsyncTCP_detail::tcp_connected(void *arg, tcp_pcb *pcb, err_t err) {
-  // ets_printf("+C: 0x%08x\n", pcb);
-  AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
-  lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CONNECTED, client};
-  if (!e) {
-    log_e("Failed to allocate event packet");
+  AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
+  lwip_tcp_event_packet_t *e = (ERR_OK == err && pcb && c) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_CONNECTED, c} : nullptr;
+  s8_t slot = (e) ? _register_client_slot(c) : INVALID_CLOSED_SLOT;
+  if (INVALID_CLOSED_SLOT == slot) {
+    log_e("Connection failed");
     return ERR_MEM;
   }
-  e->connected.pcb = pcb;
-  e->connected.err = err;
   queue_mutex_guard guard;
-  _send_async_event(e);
+  c->_is_valid = true;
+  e->connected.pcb = pcb;
+  _bind_tcp_callbacks(pcb, c);
+  _prepend_async_event(e);
   return ERR_OK;
 }
 
@@ -650,7 +652,7 @@ err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb,
 
     if (e->recv.err != ERR_OK) {
       e->event = LWIP_TCP_FIN;
-      client->_lwip_fin(e->fin.pcb, e->fin.err);
+      err = client->_lwip_fin(e->fin.pcb, e->fin.err);
     }
 #endif
   } else {
@@ -659,12 +661,12 @@ err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb,
     e->fin.pcb = pcb;
     e->fin.err = err;
     // close the PCB in LwIP thread
-    client->_lwip_fin(e->fin.pcb, e->fin.err);
+    err = client->_lwip_fin(e->fin.pcb, e->fin.err);
   }
 
   queue_mutex_guard guard;
   _send_async_event(e);
-  return ERR_OK;
+  return err;
 }
 
 err_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
@@ -705,9 +707,9 @@ void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
   _send_async_event(e);
 }
 
-static void _tcp_dns_found(const char *name, ip_addr_t *ipaddr, void *arg) {
+void AsyncTCP_detail::_tcp_dns_found(const char *name, const ip_addr_t *ipaddr, void *arg) {
   // ets_printf("+DNS: name=%s ipaddr=0x%08x arg=%x\n", name, ipaddr, arg);
-  auto client = reinterpret_cast<AsyncClient *>(arg);
+  AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
 
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DNS, client};
   if (!e) {
@@ -731,7 +733,7 @@ static void _tcp_dns_found(const char *name, ip_addr_t *ipaddr, void *arg) {
  * */
 
 #include "lwip/priv/tcpip_priv.h"
-
+typedef void (*tcp_close_callback)(void *arg);
 typedef struct {
   struct tcpip_api_call_data call;
   AsyncClient *client;
@@ -748,6 +750,7 @@ typedef struct {
     struct {
       ip_addr_t *addr;
       tcp_connected_fn cb;
+      void *arg;
       uint16_t port;
     } connect;
     struct {
@@ -756,6 +759,10 @@ typedef struct {
       dns_found_callback cb;
       void *arg;
     } dns_found;
+    struct {
+      tcp_close_callback cb;
+      void *arg;
+    } close;
     struct {
       ip_addr_t *addr;
       u8_t type;
@@ -770,7 +777,7 @@ typedef struct {
 
 static err_t _tcp_bind_callback_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
-  msg->err = ERR_CONN;
+  msg->err = ERR_OK;
   _bind_tcp_callbacks(msg->pcb, msg->client);
   return msg->err;
 }
@@ -855,25 +862,27 @@ static err_t _tcp_close_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
   if (_is_pcb_slot_valid(msg->closed_slot, msg->pcb)) {
-    // Unlike the other calls, this is not a direct wrapper of the LwIP function;
-    // we perform the AsyncClient teardown interlocked safely with the LwIP task.
-    _reset_tcp_callbacks(msg->pcb, msg->client);
+    _reset_tcp_callbacks(msg->pcb, (AsyncClient *)msg->close.arg);
     msg->err = tcp_close(msg->pcb);
     if (msg->err != ERR_OK) {
       tcp_abort(msg->pcb);
+      msg->err = ERR_ABRT;
+    }
+    if (msg->close.cb) {
+      msg->close.cb(msg->close.arg);
     }
   }
   return msg->err;
 }
 
-static esp_err_t _tcp_close(tcp_pcb *pcb, int8_t closed_slot, AsyncClient *client) {
+static esp_err_t _tcp_close(tcp_pcb *pcb, tcp_close_callback cb, void *arg) {
   if (!pcb) {
     return ERR_CONN;
   }
   tcp_api_call_t msg;
   msg.pcb = pcb;
-  msg.closed_slot = closed_slot;
-  msg.client = client;
+  msg.close.cb = cb;
+  msg.close.arg = arg;
   tcpip_api_call(_tcp_close_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
 }
@@ -882,8 +891,8 @@ static err_t _tcp_abort_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
   if (_is_pcb_slot_valid(msg->closed_slot, msg->pcb)) {
-    msg->err = ERR_OK;
     tcp_abort(msg->pcb);
+    msg->err = ERR_ABRT;
   }
   return msg->err;
 }
@@ -901,15 +910,18 @@ static esp_err_t _tcp_abort(tcp_pcb *pcb, int8_t closed_slot) {
 
 static err_t _tcp_connect_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
+  tcp_arg(msg->pcb, msg->connect.arg);
   msg->err = tcp_connect(msg->pcb, msg->connect.addr, msg->connect.port, msg->connect.cb);
   if (msg->err != ERR_OK) {
-    _reset_tcp_callbacks(msg->pcb, nullptr);
+    ASYNC_TCP_CONSOLE("Error %d", msg->err);
     tcp_abort(msg->pcb);
+    msg->err = ERR_ABRT;
+
   }
   return msg->err;
 }
 
-static esp_err_t _tcp_connect(tcp_pcb *pcb, int8_t closed_slot, ip_addr_t *addr, uint16_t port, tcp_connected_fn cb) {
+static esp_err_t _tcp_connect(tcp_pcb *pcb, int8_t closed_slot, ip_addr_t *addr, uint16_t port, tcp_connected_fn cb, void *arg) {
   if (!pcb) {
     return ESP_FAIL;
   }
@@ -919,6 +931,7 @@ static esp_err_t _tcp_connect(tcp_pcb *pcb, int8_t closed_slot, ip_addr_t *addr,
   msg.connect.addr = addr;
   msg.connect.port = port;
   msg.connect.cb = cb;
+  msg.connect.arg = arg;
   tcpip_api_call(_tcp_connect_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
 }
@@ -929,12 +942,12 @@ static err_t _dns_gethostbyname_api(struct tcpip_api_call_data *api_call_msg) {
   return msg->err;
 }
 
-static esp_err_t _dns_gethostbyname(const char *hostname, ip_addr_t *addr, dns_found_callback found, void *callback_arg) {
+static esp_err_t _dns_gethostbyname(const char *hostname, ip_addr_t *addr, dns_found_callback found, void *arg) {
   tcp_api_call_t msg;
   msg.dns_found.name = hostname;
   msg.dns_found.addr = addr;
   msg.dns_found.cb = found;
-  msg.dns_found.arg = callback_arg;
+  msg.dns_found.arg = arg;
   tcpip_api_call(_dns_gethostbyname_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
 }
@@ -958,6 +971,7 @@ static err_t _tcp_bind_api(struct tcpip_api_call_data *api_call_msg) {
   msg->err = tcp_bind(msg->pcb, msg->bind.addr, msg->bind.port);
   if (msg->err != ERR_OK) {
     tcp_abort(msg->pcb); // forcibly free unbound PCB
+    msg->err = ERR_ABRT;
   }
   return msg->err;
 }
@@ -1013,31 +1027,19 @@ void asynctcp_callback(asynctcp_callback_fn function, void *ctx) {
   _send_async_event(e);
 }
 
-AsyncClient::AsyncClient(tcp_pcb *pcb)
-  : _connect_cb(0), _connect_cb_arg(0), _discard_cb(0), _discard_cb_arg(0), _sent_cb(0), _sent_cb_arg(0), _error_cb(0), _error_cb_arg(0), _recv_cb(0),
-    _recv_cb_arg(0), _pb_cb(0), _pb_cb_arg(0), _timeout_cb(0), _timeout_cb_arg(0), _poll_cb(0), _poll_cb_arg(0), _ack_pcb(true), _tx_last_packet(0),
-    _rx_timeout(0), _rx_last_ack(0), _rx_ack_len(0), _ack_timeout(CONFIG_ASYNC_TCP_MAX_ACK_TIME), _connect_port(0) {
-  _pcb = pcb;
-  _closed_slot = INVALID_CLOSED_SLOT;
-  if (_pcb) {
-    _rx_last_packet = millis();
-    _bind_tcp_callbacks(_pcb, this);
-    if (!_allocate_closed_slot()) {
-      _close();
-      ASYNC_TCP_CONSOLE("Allocate %u failure", this);
-    } else {
-      ASYNC_TCP_CONSOLE("Allocate %u  _closed_slot[%d] succeed", this, _closed_slot);
+AsyncClient::AsyncClient(tcp_pcb *pcb, AsyncServer *server)
+  : _is_valid(false), _pcb(pcb), _server(server), _connect_cb(0), _connect_cb_arg(0), _discard_cb(0), _discard_cb_arg(0), _sent_cb(0), _sent_cb_arg(0), _error_cb(0),
+    _error_cb_arg(0), _recv_cb(0), _recv_cb_arg(0), _pb_cb(0), _pb_cb_arg(0), _timeout_cb(0), _timeout_cb_arg(0), _poll_cb(0), _poll_cb_arg(0), _ack_pcb(true),
+    _tx_last_packet(0), _rx_timeout(0), _rx_last_ack(0), _rx_ack_len(0), _ack_timeout(CONFIG_ASYNC_TCP_MAX_ACK_TIME), _connect_port(0) {
+      ASYNC_TCP_CONSOLE("%u: New client", this);
     }
-  }
-}
 
 AsyncClient::~AsyncClient() {
-  ASYNC_TCP_CONSOLE("Deallocate client %u _closed_slot[%d]", this, _closed_slot);
-  if (_pcb) {
-    ASYNC_TCP_CONSOLE("%u: close", this);
+  ASYNC_TCP_CONSOLE("%u: delete client", this);
+  if (_is_valid) {
     _close();
+    _unregister_client_slot(this);
   }
-  _free_closed_slot();
 }
 
 /*
@@ -1111,35 +1113,27 @@ bool AsyncClient::connect(ip_addr_t addr, uint16_t port) {
 
   ASYNC_TCP_CONSOLE("%u port: %u", this, port);
 
-  if (!_allocate_closed_slot()) {
-    log_e("failed to allocate: closed slot full");
+  if (_client_slot_available() == INVALID_CLOSED_SLOT) {
+    log_e("client slot full");
     return false;
   }
   
   tcp_pcb *pcb;
-  {
-    tcp_core_guard tcg;
 #if LWIP_IPV4 && LWIP_IPV6
-    pcb = _tcp_new_ip_type(addr.type);
+  pcb = _tcp_new_ip_type(addr.type);
 #else
-    pcb = _tcp_new_ip_type(IPADDR_TYPE_V4);
+  pcb = _tcp_new_ip_type(IPADDR_TYPE_V4);
 #endif
-    if (!pcb) {
-      log_e("pcb == NULL");
-      _free_closed_slot();
-      return false;
-    }
-    _tcp_bind_callback(pcb, this);
+  if (!pcb) {
+    log_e("pcb == NULL");
+    return false;
   }
 
-  esp_err_t err = _tcp_connect(pcb, _closed_slot, &addr, port, AsyncTCP_detail::tcp_connected);
+  _pcb = pcb;
+  esp_err_t err = _tcp_connect(pcb, _closed_slot, &addr, port, AsyncTCP_detail::tcp_connected, this);
   bool result = (err == ESP_OK);
-  if (result) {
+  if (!result) {
     log_e("tcp_connect failed: %d", err);
-    _pcb = pcb;
-    _allocate_closed_slot(); // update pcb into _pcb_slots[_closed_slot]
-  } else {
-    _free_closed_slot();
   }
   return result;
 }
@@ -1183,7 +1177,7 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
   }
 
   _connect_port = port;
-  err_t err = _dns_gethostbyname(host, &addr, (dns_found_callback)&_tcp_dns_found, this);
+  err_t err = _dns_gethostbyname(host, &addr, AsyncTCP_detail::_tcp_dns_found, this);
 
   if (err == ERR_OK) {
     ASYNC_TCP_CONSOLE("IP: %s\n", ipaddr_ntoa(&addr));
@@ -1297,15 +1291,24 @@ void AsyncClient::ackPacket(struct pbuf *pb) {
 err_t AsyncClient::_close() {
   // ets_printf("X: 0x%08x\n", (uint32_t)this);
   err_t err = ERR_OK;
-  if (_pcb) {
-    _tcp_close(_pcb, _closed_slot, this);
-    _free_closed_slot();
-    _pcb = NULL;
-    if (_discard_cb) {
-      ASYNC_TCP_CONSOLE("%u: disconnect", this);
-      _discard_cb(_discard_cb_arg, this);
-      _discard_cb = nullptr;
+  tcpip_callback([](void *arg) {
+    // run in LwIP thread
+    AsyncClient *c = (AsyncClient *)arg;
+    if (c->_pcb) {
+      _reset_tcp_callbacks(c->_pcb, c); // It has to be called before tcp_close();
+      if (tcp_close(c->_pcb) != ERR_OK) {
+        tcp_abort(c->_pcb);
+      }
     }
+    _unregister_client_slot(c);
+    c->_is_valid = false;
+    c->_pcb = NULL;
+  }, this);
+
+  if (_discard_cb) {
+    ASYNC_TCP_CONSOLE("%u: disconnect", this);
+    _discard_cb(_discard_cb_arg, this);
+    _discard_cb = nullptr;
   }
   return err;
 }
@@ -1355,13 +1358,7 @@ bool AsyncClient::valid() {
 /*
  * Private Callbacks
  * */
-
-/**
- * This callback for http client
- * a callback when client connected to host successful
- * bool AsyncClient::connect(ip_addr_t addr, uint16_t port)
-*/
-err_t AsyncClient::_connected(tcp_pcb *pcb, err_t err) {
+err_t AsyncClient::_connected(tcp_pcb *pcb) {
   ASYNC_TCP_CONSOLE("%u", this);
   if (_pcb) {
     _rx_last_packet = millis();
@@ -1395,10 +1392,11 @@ err_t AsyncClient::_lwip_fin(tcp_pcb *pcb, err_t err) {
   _reset_tcp_callbacks(_pcb, this);
   if (tcp_close(_pcb) != ERR_OK) {
     tcp_abort(_pcb);
+    err = ERR_ABRT;
   }
   _free_closed_slot();
   _pcb = NULL;
-  return ERR_OK;
+  return err;
 }
 
 // In Async Thread
@@ -1811,10 +1809,10 @@ const char *AsyncClient::stateToString() const {
  */
 
 AsyncServer::AsyncServer(ip_addr_t addr, uint16_t port)
-  : _port(port), _addr(addr), _noDelay(false), _pcb(nullptr), _connect_cb(nullptr), _connect_cb_arg(nullptr) {}
+  : _port(port), _addr(addr), _noDelay(false), _pcb(nullptr), _listen_connect_cb(nullptr), _connect_cb_arg(nullptr) {}
 
 #ifdef ARDUINO
-AsyncServer::AsyncServer(IPAddress addr, uint16_t port) : _port(port), _noDelay(false), _pcb(0), _connect_cb(0), _connect_cb_arg(0) {
+AsyncServer::AsyncServer(IPAddress addr, uint16_t port) : _port(port), _noDelay(false), _pcb(0), _listen_connect_cb(0), _connect_cb_arg(0) {
 #if ESP_IDF_VERSION_MAJOR < 5
 #if LWIP_IPV4 && LWIP_IPV6
   _addr.type = IPADDR_TYPE_V4;
@@ -1827,7 +1825,7 @@ AsyncServer::AsyncServer(IPAddress addr, uint16_t port) : _port(port), _noDelay(
 #endif
 }
 #if ESP_IDF_VERSION_MAJOR < 5 && __has_include(<IPv6Address.h>) && LWIP_IPV6
-AsyncServer::AsyncServer(IPv6Address addr, uint16_t port) : _port(port), _noDelay(false), _pcb(0), _connect_cb(0), _connect_cb_arg(0) {
+AsyncServer::AsyncServer(IPv6Address addr, uint16_t port) : _port(port), _noDelay(false), _pcb(0), _listen_connect_cb(0), _connect_cb_arg(0) {
 #if LWIP_IPV4 && LWIP_IPV6
   _addr.type = IPADDR_TYPE_V6;
 #endif
@@ -1837,7 +1835,7 @@ AsyncServer::AsyncServer(IPv6Address addr, uint16_t port) : _port(port), _noDela
 #endif
 #endif
 
-AsyncServer::AsyncServer(uint16_t port) : _port(port), _noDelay(false), _pcb(0), _connect_cb(0), _connect_cb_arg(0) {
+AsyncServer::AsyncServer(uint16_t port) : _port(port), _noDelay(false), _pcb(0), _listen_connect_cb(0), _connect_cb_arg(0) {
 #if LWIP_IPV4 && LWIP_IPV6
   _addr.type = IPADDR_TYPE_ANY;
   _addr.u_addr.ip4.addr = INADDR_ANY;
@@ -1851,7 +1849,7 @@ AsyncServer::~AsyncServer() {
 }
 
 void AsyncServer::onClient(AcConnectHandler cb, void *arg) {
-  _connect_cb = cb;
+  _listen_connect_cb = cb;
   _connect_cb_arg = arg;
 }
 
@@ -1869,13 +1867,11 @@ void AsyncServer::begin() {
   tcpip_callback([](void *arg) {
     AsyncServer *server = (AsyncServer *)arg;
     err_t err;
-    {
-  #if LWIP_IPV4 && LWIP_IPV6
-      server->_pcb = tcp_new_ip_type(server->_addr.type);
-  #else
-      _pcb = _tcp_new_ip_type(IPADDR_TYPE_ANY);
-  #endif
-    }
+#if LWIP_IPV4 && LWIP_IPV6
+    server->_pcb = tcp_new_ip_type(server->_addr.type);
+#else
+    _pcb = _tcp_new_ip_type(IPADDR_TYPE_ANY);
+#endif
     if (!server->_pcb) {
       log_e("_pcb == NULL");
       return;
@@ -1890,7 +1886,7 @@ void AsyncServer::begin() {
       return;
     }
 
-    static uint8_t backlog = CONFIG_LWIP_MAX_ACTIVE_TCP;
+    constexpr uint8_t backlog = CONFIG_LWIP_MAX_ACTIVE_TCP / 2; // up to you
     server->_pcb = tcp_listen_with_backlog(server->_pcb, backlog);
     if (!server->_pcb) {
       log_e("listen_pcb == NULL");
@@ -1902,24 +1898,32 @@ void AsyncServer::begin() {
 }
 
 void AsyncServer::end() {
-  // Safely to run in the LwIP thread
   tcpip_callback([](void *arg) {
-    AsyncServer *server = (AsyncServer *)arg;
-    if (server->_pcb) {
-      tcp_core_guard tcg;
-      tcp_arg(server->_pcb, NULL);
-      tcp_accept(server->_pcb, NULL);
-      if (tcp_close(server->_pcb) != ERR_OK) {
-        tcp_abort(server->_pcb);
+    // run in LwIP thread
+    AsyncServer *s = (AsyncServer *)arg;
+    if (s->_pcb) {
+      tcp_arg(s->_pcb, NULL);
+      tcp_accept(s->_pcb, NULL);
+      if (tcp_close(s->_pcb) != ERR_OK) {
+        tcp_abort(s->_pcb);
       }
-      server->_pcb = NULL;
+      s->_pcb = NULL;
     }
   }, this);
+
+  xSemaphoreTake(_client_mutex, portMAX_DELAY);
+  for (int i = 0; i < CONFIG_LWIP_MAX_ACTIVE_TCP; ++i) {
+    AsyncClient *c = _clients[i];
+    if (c && c->_is_valid && c->_server == this) {
+      c->close(true);
+    }
+  }
+  xSemaphoreGive(_client_mutex);
 }
 
 err_t AsyncServer::_accepted(AsyncClient *client) {
-  if (_connect_cb) {
-    _connect_cb(_connect_cb_arg, client);
+  if (_listen_connect_cb) {
+    _listen_connect_cb(_connect_cb_arg, client);
   }
   return ERR_OK;
 }
