@@ -133,6 +133,7 @@ typedef enum {
   LWIP_TCP_SENT,
   LWIP_TCP_RECV,
   LWIP_TCP_FIN,
+  LWIP_TCP_CLOSE,
   LWIP_TCP_ERROR,
   LWIP_TCP_POLL,
   LWIP_TCP_ACCEPT,
@@ -287,7 +288,7 @@ s8_t _unregister_client_slot(AsyncClient *client) {
   return slot;
 }
 
-bool _is_client_valid(AsyncClient *client) {
+bool _is_client_slot_valid(AsyncClient *client) {
   bool valid = false;
   xSemaphoreTake(_client_mutex, portMAX_DELAY);
   for (u8_t i = 0; i < CONFIG_LWIP_MAX_ACTIVE_TCP; ++i) {
@@ -509,16 +510,11 @@ static void _bind_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
 
 // For safe: only run in LwIP callbacks or TPC/IP raw API tcpip_api_call and tcpip_callback
 static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
-  if (pcb) {
-    tcp_arg(pcb, NULL);
-    tcp_sent(pcb, NULL);
-    tcp_recv(pcb, NULL);
-    tcp_err(pcb, NULL);
-    tcp_poll(pcb, NULL, 0);
-  }
-  if (client) {
-    _remove_events_for_client(client); // Should check run in/out side which is better
-  }
+  tcp_arg(pcb, NULL);
+  tcp_sent(pcb, NULL);
+  tcp_recv(pcb, NULL);
+  tcp_err(pcb, NULL);
+  tcp_poll(pcb, NULL, 0);
 }
 
 // TCP Server: listen pcb callback
@@ -652,6 +648,7 @@ err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb,
 
     if (e->recv.err != ERR_OK) {
       e->event = LWIP_TCP_FIN;
+      // close the PCB in LwIP thread
       err = client->_lwip_fin(e->fin.pcb, e->fin.err);
     }
 #endif
@@ -1037,8 +1034,8 @@ AsyncClient::AsyncClient(tcp_pcb *pcb, AsyncServer *server)
 AsyncClient::~AsyncClient() {
   ASYNC_TCP_CONSOLE("%u: delete client", this);
   if (_is_valid) {
-    _close();
-    _unregister_client_slot(this);
+    resetCallback();  // avoid any recursive callback
+    close(true); // close immediately in LwIP thread
   }
 }
 
@@ -1204,17 +1201,19 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
 /**
  * _close(), _tcp_close(),  _free_closed_slot() --> onDisconnect() --> ~AsyncClient()
 */
-void AsyncClient::close(bool now) {
+void AsyncClient::close(bool thread) {
   if (!_is_pcb_slot_valid(_closed_slot, _pcb)) {
     return;
   }
 
-  if (now) {
-    _close(); // run in lwIP thread 
+  if (IN_LWIP_THREAD == thread) {
+    _close(); // client shall be closed directly in lwIP thread 
   } else {
+    // callback shall be scheduled in Async thread.
     asynctcp_callback([](void *arg) {
+      // run in Async thread 
       AsyncClient *client = (AsyncClient *)arg;
-      client->_close(); // run in Async thread 
+      client->_close(); // client shall be closed directly in lwIP thread 
     }, this);
   }
 }
@@ -1294,12 +1293,13 @@ err_t AsyncClient::_close() {
   tcpip_callback([](void *arg) {
     // run in LwIP thread
     AsyncClient *c = (AsyncClient *)arg;
-    if (c->_pcb) {
+    if (c->_pcb && c->_is_valid) {
       _reset_tcp_callbacks(c->_pcb, c); // It has to be called before tcp_close();
       if (tcp_close(c->_pcb) != ERR_OK) {
         tcp_abort(c->_pcb);
       }
     }
+    _remove_events_for_client(c);
     _unregister_client_slot(c);
     c->_is_valid = false;
     c->_pcb = NULL;
@@ -1311,6 +1311,17 @@ err_t AsyncClient::_close() {
     _discard_cb = nullptr;
   }
   return err;
+}
+
+void AsyncClient::resetCallback() {
+  _connect_cb = nullptr;
+  _discard_cb = nullptr;
+  _sent_cb = nullptr;
+  _error_cb = nullptr;
+  _recv_cb = nullptr;
+  _pb_cb = nullptr;
+  _timeout_cb = nullptr;
+  _poll_cb = nullptr;
 }
 
 bool AsyncClient::_allocate_closed_slot() {
@@ -1409,6 +1420,14 @@ err_t AsyncClient::_fin(tcp_pcb *pcb, err_t err) {
   return ERR_OK;
 }
 
+void AsyncClient::_end() {
+  if (_discard_cb) {
+    ASYNC_TCP_CONSOLE("%u: disconnect", this);
+    _discard_cb(_discard_cb_arg, this);
+    _discard_cb = nullptr;
+  }
+}
+
 err_t AsyncClient::_sent(tcp_pcb *pcb, uint16_t len) {
   _rx_last_ack = _rx_last_packet = millis();
   if (_sent_cb) {
@@ -1468,7 +1487,7 @@ err_t AsyncClient::_poll(tcp_pcb *pcb) {
   if (_rx_timeout && (now - _rx_last_packet) >= (_rx_timeout * 1000)) {
     log_d("rx timeout %d", pcb->state);
     ASYNC_TCP_CONSOLE("%u: rx timeout", this);
-    _close();
+    close(IN_ASYNC_THREAD);
     return ERR_OK;
   }
   // Everything is fine
@@ -1915,7 +1934,8 @@ void AsyncServer::end() {
   for (int i = 0; i < CONFIG_LWIP_MAX_ACTIVE_TCP; ++i) {
     AsyncClient *c = _clients[i];
     if (c && c->_is_valid && c->_server == this) {
-      c->close(true);
+      c->close(true); // close immediately in LwIP thread
+      delete c;
     }
   }
   xSemaphoreGive(_client_mutex);

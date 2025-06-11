@@ -89,6 +89,11 @@ class AsyncTCP_detail;
 
 class AsyncClient {
 public:
+  typedef enum : bool {
+    IN_ASYNC_THREAD = 0,
+    IN_LWIP_THREAD
+  } thread_handler_t;
+
   AsyncClient(tcp_pcb *pcb = nullptr, AsyncServer *server = nullptr);
   ~AsyncClient();
 
@@ -116,12 +121,12 @@ public:
   /**
      * @brief close connection
      *
-     * @param now - ignored
+     * @param thread: ref thread_handler_t
      */
-  void close(bool now = false);
+  void close(bool thread = IN_ASYNC_THREAD);
   // same as close()
   void stop() {
-    close(false);
+    close(IN_ASYNC_THREAD);
   };
   err_t abort();
   bool free();
@@ -254,6 +259,8 @@ public:
   void onTimeout(AcTimeoutHandler cb, void *arg = 0);
   // set callback - every 125ms when connected
   void onPoll(AcConnectHandler cb, void *arg = 0);
+  // reset all callback
+  void resetCallback();
 
   // ack pbuf from onPacket
   void ackPacket(struct pbuf *pb);
@@ -322,6 +329,7 @@ protected:
   err_t _fin(tcp_pcb *pcb, err_t err);
   err_t _lwip_fin(tcp_pcb *pcb, err_t err);
   void _dns_found(ip_addr_t *ipaddr);
+  void _end();
 };
 
 class AsyncServer {
