@@ -82,7 +82,7 @@ typedef std::function<void(void *, AsyncClient *, uint32_t time)> AcTimeoutHandl
 
 /** Function prototype for functions passed to asynctcp_callback() */
 typedef void (*asynctcp_callback_fn)(void *ctx);
-void asynctcp_callback(asynctcp_callback_fn function, void *ctx);
+err_t asynctcp_callback(asynctcp_callback_fn function, void *ctx);
 
 struct tcp_pcb;
 class AsyncTCP_detail;
@@ -282,9 +282,12 @@ public:
     return _closed_slot;
   }
 
-  // internal handle in LwIP thread;
+  // internal handle in LwIP thread, do not use.
   tcp_pcb *_pcb;
   bool _is_valid;
+
+  // system handle in Async thread, do not use.
+  bool _is_async_task_release;
 
 protected:
   friend class AsyncTCP_detail;
@@ -320,6 +323,7 @@ protected:
   uint16_t _connect_port;
 
   err_t _close();
+  err_t _abort();
   void _free_closed_slot();
   bool _allocate_closed_slot();
   err_t _connected(tcp_pcb *pcb);
@@ -329,7 +333,7 @@ protected:
   err_t _fin(tcp_pcb *pcb, err_t err);
   err_t _lwip_fin(tcp_pcb *pcb, err_t err);
   void _dns_found(ip_addr_t *ipaddr);
-  void _end();
+  void _disconnect(err_t err);
 };
 
 class AsyncServer {
@@ -349,6 +353,9 @@ public:
   void setNoDelay(bool nodelay);
   bool getNoDelay() const;
   uint8_t status() const;
+
+  // system callbacks (do not call)
+  void _handleDisconnect(AsyncClient *client);
 
 protected:
   friend class AsyncTCP_detail;
