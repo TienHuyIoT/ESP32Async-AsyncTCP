@@ -278,23 +278,19 @@ public:
   tcp_pcb *pcb() {
     return _pcb;
   }
-  int8_t closedSlot() {
-    return _closed_slot;
+  s8_t slot() {
+    return _slot;
   }
 
   // internal handle in LwIP thread, do not use.
   tcp_pcb *_pcb;
-  bool _is_valid;
-
-  // system handle in Async thread, do not use.
-  bool _is_async_task_release;
+  s8_t _slot;
 
 protected:
   friend class AsyncTCP_detail;
   friend class AsyncServer;
 
   AsyncServer *_server;
-  int8_t _closed_slot;
 
   AcConnectHandler _connect_cb;
   void *_connect_cb_arg;
@@ -332,6 +328,8 @@ protected:
   err_t _sent(tcp_pcb *pcb, uint16_t len);
   err_t _fin(tcp_pcb *pcb, err_t err);
   err_t _lwip_fin(tcp_pcb *pcb, err_t err);
+  err_t _lwip_abort(tcp_pcb *pcb);
+  err_t _lwip_close(tcp_pcb *pcb);
   void _dns_found(ip_addr_t *ipaddr);
   void _disconnect(err_t err);
 };
