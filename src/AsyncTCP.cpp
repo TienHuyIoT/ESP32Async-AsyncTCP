@@ -102,14 +102,13 @@ struct tcp_core_guard {
   TCP poll interval is specified in terms of the TCP coarse timer interval, which is called twice a second
   https://github.com/espressif/esp-lwip/blob/2acf959a2bb559313cd2bf9306c24612ba3d0e19/src/core/tcp.c#L1895
 */
-#define CONFIG_ASYNC_TCP_POLL_TIMER 2 // Called every 1s
+#define CONFIG_ASYNC_TCP_POLL_TIMER 2 // Called every 2 * 500ms
 
 typedef void (*tcp_close_callback)(void *arg);
 typedef void (*tcp_abort_callback)(void *arg);
 /*
  * TCP/IP API Calls private prototype
  * */
-// static esp_err_t _tcp_bind_callback(tcp_pcb *pcb, AsyncClient *client) ;
 static err_t _tcp_output(struct tcpip_api_call_data *api_call_msg);
 static esp_err_t _tcp_write(tcp_pcb *pcb, s8_t client_slot, const char *data, size_t size, uint8_t apiflags);
 // static esp_err_t _tcp_recved(tcp_pcb *pcb, s8_t client_slot, size_t len);
@@ -118,8 +117,6 @@ static esp_err_t _tcp_abort(tcp_pcb *pcb, s8_t client_slot, tcp_abort_callback c
 static esp_err_t _tcp_connect(tcp_pcb *pcb, s8_t client_slot, ip_addr_t *addr, uint16_t port, tcp_connected_fn cb, void *arg);
 static esp_err_t _dns_gethostbyname(const char *hostname, ip_addr_t *addr, dns_found_callback found, void *arg);
 static tcp_pcb *_tcp_new_ip_type(u8_t type);
-static esp_err_t _tcp_bind(tcp_pcb *pcb, ip_addr_t *addr, uint16_t port);
-static tcp_pcb *_tcp_listen_with_backlog(tcp_pcb *pcb, uint8_t backlog);
 
 /*
  * TCP/IP Event Task
@@ -308,7 +305,7 @@ static bool _is_pcb_slot_valid(s8_t slot, tcp_pcb *pcb) {
     AsyncClient *c = _clients[slot];
     return (c && c->_pcb == pcb);
   } else {
-    ASYNC_TCP_CONSOLE_E("Error due to Slot = %d", slot);
+    ASYNC_TCP_CONSOLE_I("Error due to Slot = %d", slot);
   }
   return false;
 }
@@ -543,9 +540,9 @@ static void _reset_tcp_callbacks(tcp_pcb *pcb, AsyncClient *client) {
 }
 
 // TCP Server: listen pcb callback
-err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
+err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *c_pcb, err_t err) {
   AsyncServer *s = reinterpret_cast<AsyncServer *>(arg);
-  AsyncClient *c = (ERR_OK == err && pcb && s) ? new (std::nothrow) AsyncClient(pcb, s) : nullptr;
+  AsyncClient *c = (ERR_OK == err && c_pcb && s) ? new (std::nothrow) AsyncClient(c_pcb, s) : nullptr;
   lwip_tcp_event_packet_t *e = (c) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_ACCEPT, c} : nullptr;
   s8_t slot = (e) ? _register_client_slot(c) : INVALID_CLIENT_SLOT;
   bool accepted = (slot != INVALID_CLIENT_SLOT && s->_listen_connect_cb) ? true : false;
@@ -560,13 +557,14 @@ err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
     if (c) {
       delete c;
     }
-
+    
     if (slot != INVALID_CLIENT_SLOT) {
       _unregister_client_slot(c);
     }
 
-    if (pcb) {
-      tcp_abort(pcb);
+    // Check if c_pcb was allocated
+    if (c_pcb) {
+      tcp_abort(c_pcb);
       // https://github.com/espressif/esp-lwip/blob/master/src/core/tcp.c#L636
       return ERR_ABRT;  // correct after aborting
     }
@@ -574,11 +572,11 @@ err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *pcb, err_t err) {
   }
   
   queue_mutex_guard guard;
-  c->_pcb = pcb;
+  c->_pcb = c_pcb;
   c->_slot = slot;  // now slot is valid
   e->client = c;
   e->accept.server = s;
-  _bind_tcp_callbacks(pcb, c);
+  _bind_tcp_callbacks(c_pcb, c);
   _prepend_async_event(e);
   return ERR_OK;
 }
@@ -678,11 +676,6 @@ err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb,
     // ASYNC_TCP_CONSOLE_I("pb = %u tot_len = %u len = %u ref = %u", pb, pb->tot_len, pb->len, pb->ref);
     tcp_recved(pcb, pb->tot_len);
     // pbuf_free(pb);  // Async task shall handle pbuf_free(pb)
-
-    if (!e->recv.pb) {
-      e->event = LWIP_TCP_FIN;
-      err = c->_lwip_close(pcb);
-    }
   } else {
     e->event = LWIP_TCP_FIN;
     err = c->_lwip_close(pcb);
@@ -719,8 +712,8 @@ err_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
 }
 
 void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
-  ASYNC_TCP_CONSOLE_I("%u Connection aborted or reset, err = %d", arg, err);
   AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
+  ASYNC_TCP_CONSOLE_E("%u Connection aborted or reset, err = %s", arg, c->errorToString(err));
   if (_is_client_slot_valid(c)) {
     _remove_events_for_client(c);
     c->_pcb = nullptr;
@@ -962,28 +955,6 @@ static tcp_pcb *_tcp_new_ip_type(u8_t type) {
   msg.new_ip.type = type;
   tcpip_api_call(_tcp_new_ip_type_api, (struct tcpip_api_call_data *)&msg);
   return msg.pcb;
-}
-
-static err_t _tcp_bind_api(struct tcpip_api_call_data *api_call_msg) {
-  tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
-  msg->err = tcp_bind(msg->pcb, msg->bind.addr, msg->bind.port);
-  if (msg->err != ERR_OK) {
-    tcp_abort(msg->pcb); // forcibly free unbound PCB
-    msg->err = ERR_ABRT;
-  }
-  return msg->err;
-}
-
-static esp_err_t _tcp_bind(tcp_pcb *pcb, ip_addr_t *addr, uint16_t port) {
-  if (!pcb) {
-    return ESP_FAIL;
-  }
-  tcp_api_call_t msg;
-  msg.pcb = pcb;
-  msg.bind.addr = addr;
-  msg.bind.port = port;
-  tcpip_api_call(_tcp_bind_api, (struct tcpip_api_call_data *)&msg);
-  return msg.err;
 }
 
 /*
@@ -1941,7 +1912,6 @@ void AsyncServer::end() {
     }
   }
 #endif
-
   }, this);
 
 #if (1)
