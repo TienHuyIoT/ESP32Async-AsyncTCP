@@ -291,7 +291,6 @@ protected:
   friend class AsyncServer;
 
   AsyncServer *_server;
-
   AcConnectHandler _connect_cb;
   void *_connect_cb_arg;
   AcConnectHandler _discard_cb;
@@ -320,14 +319,11 @@ protected:
 
   err_t _close();
   err_t _abort();
-  void _free_closed_slot();
-  bool _allocate_closed_slot();
   err_t _connected(tcp_pcb *pcb);
   void _error(err_t err);
   err_t _poll(tcp_pcb *pcb);
   err_t _sent(tcp_pcb *pcb, uint16_t len);
   err_t _fin(tcp_pcb *pcb, err_t err);
-  err_t _lwip_fin(tcp_pcb *pcb, err_t err);
   err_t _lwip_abort(tcp_pcb *pcb);
   err_t _lwip_close(tcp_pcb *pcb);
   void _dns_found(ip_addr_t *ipaddr);
@@ -361,7 +357,7 @@ protected:
   uint16_t _port;
   ip_addr_t _addr;
   bool _noDelay;
-  tcp_pcb *_pcb;
+  tcp_pcb *_listen_pcb;
   AcConnectHandler _listen_connect_cb;
   void *_connect_cb_arg;
 
