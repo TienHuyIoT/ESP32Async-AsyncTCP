@@ -26,6 +26,7 @@
 #include "sdkconfig.h"
 extern "C" {
 #include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 #include "lwip/pbuf.h"
 }
 #else
@@ -33,6 +34,7 @@ extern "C" {
 #include <lwip/pbuf.h>
 #include <FreeRTOS.h>
 #include <semphr.h>
+#include "freertos/event_groups.h"
 }
 #endif
 
@@ -285,6 +287,7 @@ public:
   // internal handle in LwIP thread, do not use.
   tcp_pcb *_pcb;
   s8_t _slot;
+  s8_t _id_disconnect;
 
 protected:
   friend class AsyncTCP_detail;
@@ -342,7 +345,7 @@ public:
   AsyncServer(uint16_t port);
   ~AsyncServer();
   void onClient(AcConnectHandler cb, void *arg);
-  void begin();
+  bool begin();
   void end();
   void setNoDelay(bool nodelay);
   bool getNoDelay() const;
@@ -350,6 +353,7 @@ public:
 
   // system callbacks (do not call)
   void _handleDisconnect(AsyncClient *client);
+  void _lwip_end();
 
 protected:
   friend class AsyncTCP_detail;
@@ -358,6 +362,8 @@ protected:
   ip_addr_t _addr;
   bool _noDelay;
   tcp_pcb *_listen_pcb;
+  EventGroupHandle_t _disconnect_events;
+  EventBits_t _wait_events;
   AcConnectHandler _listen_connect_cb;
   void *_connect_cb_arg;
 
