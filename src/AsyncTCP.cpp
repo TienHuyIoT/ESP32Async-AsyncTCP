@@ -415,7 +415,7 @@ void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
     e->client->_fin(e->fin.pcb, e->fin.err);
   } else if (e->event == LWIP_TCP_DISCONNECT) {
     // ets_printf("-F: 0x%08x\n", e->fin.pcb);
-    e->client->_disconnect(e->fin.err);
+    e->client->_disconnect(e->disconnect.err);
   } else if (e->event == LWIP_TCP_SENT) {
     // ets_printf("-S: 0x%08x\n", e->sent.pcb);
     e->client->_sent(e->sent.pcb, e->sent.len);
@@ -678,6 +678,7 @@ err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb,
     // tcp_recved(pcb, pb->tot_len);
     // pbuf_free(pb);
   } else {
+    ASYNC_TCP_CONSOLE_I("Client %u closed", c);
     e->event = LWIP_TCP_FIN;
     err = c->_lwip_close(pcb);
   }
@@ -1036,6 +1037,7 @@ AsyncClient::~AsyncClient() {
   _server = nullptr;
   resetCallback();  // avoid any recursive callback
   if (_is_pcb_slot_valid(_slot, _pcb)) {
+    ASYNC_TCP_CONSOLE_I("client %u call _close()", this);
     _close(); // client is closed directly in lwIP thread
     _remove_events_for_client(this);
   }
@@ -1200,6 +1202,7 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
  * close() --> onDisconnect() --> ~AsyncClient()
 */
 void AsyncClient::close(bool now) {
+  ASYNC_TCP_CONSOLE_I("client %u, now = %u", this, now);
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DISCONNECT, this};
   if (!e) {
     ASYNC_TCP_CONSOLE_E("Failed to allocate event packet");
@@ -1228,6 +1231,7 @@ void AsyncClient::close(bool now) {
  * abort() -->onDisconnect() --> ~AsyncClient()
 */
 err_t AsyncClient::abort() {
+  ASYNC_TCP_CONSOLE_I("client %u", this);
   _remove_events_for_client(this);
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DISCONNECT, this};
   if (!e) {
@@ -1399,7 +1403,7 @@ err_t AsyncClient::_connected(tcp_pcb *pcb) {
 }
 
 void AsyncClient::_disconnect(err_t err) {
-  ASYNC_TCP_CONSOLE_I("client %u", this);
+  ASYNC_TCP_CONSOLE_I("client %u err = %d", this, err);
   if (ERR_ISCONN == err) {
     _close(); // close client in lwIP thread 
   }
