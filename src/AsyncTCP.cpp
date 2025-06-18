@@ -1249,11 +1249,16 @@ err_t AsyncClient::abort() {
   return ERR_ABRT;
 }
 
-size_t AsyncClient::space() const {
-  if ((_pcb != NULL) && (_pcb->state == ESTABLISHED)) {
-    return tcp_sndbuf(_pcb);
+size_t AsyncClient::space() {
+  _space = 0;
+  if (_pcb && (_pcb->state == ESTABLISHED)) {
+    _lwip_callback([](void *arg)->err_t {
+      AsyncClient *c = (AsyncClient *)arg;
+      c->_space = tcp_sndbuf(c->_pcb);
+      return ERR_OK;
+    }, this);
   }
-  return 0;
+  return _space;
 }
 
 size_t AsyncClient::add(const char *data, size_t size, uint8_t apiflags) {
@@ -1816,7 +1821,7 @@ bool AsyncClient::freeable() const {
   return _pcb->state == CLOSED || _pcb->state > ESTABLISHED;
 }
 
-bool AsyncClient::canSend() const {
+bool AsyncClient::canSend() {
   return space() > 0;
 }
 

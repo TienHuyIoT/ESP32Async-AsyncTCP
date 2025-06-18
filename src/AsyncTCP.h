@@ -134,9 +134,9 @@ public:
   bool free();
   bool valid();
   // ack is not pending
-  bool canSend() const;
+  bool canSend();
   // TCP buffer space available
-  size_t space() const;
+  size_t space();
 
   /**
      * @brief add data to be send (but do not send yet)
@@ -288,6 +288,7 @@ public:
   tcp_pcb *_pcb;
   s8_t _slot;
   s8_t _id_disconnect;
+  size_t _space;
 
 protected:
   friend class AsyncTCP_detail;
