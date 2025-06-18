@@ -4,6 +4,7 @@
 #ifndef ASYNCTCP_H_
 #define ASYNCTCP_H_
 
+#include "AsyncConsole.h"
 #include "AsyncTCPVersion.h"
 #define ASYNCTCP_FORK_ESP32Async
 
@@ -82,6 +83,7 @@ typedef std::function<void(void *, AsyncClient *, void *data, size_t len)> AcDat
 typedef std::function<void(void *, AsyncClient *, struct pbuf *pb)> AcPacketHandler;
 typedef std::function<void(void *, AsyncClient *, uint32_t time)> AcTimeoutHandler;
 
+extern AsyncConsole AsyncTCPConsole;
 /** Function prototype for functions passed to asynctcp_callback() */
 typedef void (*asynctcp_callback_fn)(void *ctx);
 err_t asynctcp_callback(asynctcp_callback_fn function, void *ctx);
@@ -293,6 +295,8 @@ public:
 protected:
   friend class AsyncTCP_detail;
   friend class AsyncServer;
+
+  static u8_t _client_count; // number of clients created
 
   AsyncServer *_server;
   AcConnectHandler _connect_cb;
