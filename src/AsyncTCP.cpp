@@ -54,7 +54,7 @@ extern "C" {
 #endif
 
 AsyncConsole AsyncTCPConsole;
-#define ASYNC_TCP_CONSOLE_I(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
+#define ASYNC_TCP_CONSOLE_I(f_, ...)  AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
 #define ASYNC_TCP_CONSOLE_E(f_, ...)  AsyncTCPConsole.printf_P(PSTR("E [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
 
 // Required for:
@@ -623,7 +623,7 @@ err_t AsyncTCP_detail::tcp_poll(void *arg, struct tcp_pcb *pcb) {
 
   AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
   bool slot = _is_client_slot_valid(c);
-  lwip_tcp_event_packet_t *e = (slot) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_POLL, c} : nullptr;
+  lwip_tcp_event_packet_t *e = (slot && c->_pcb == pcb) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_POLL, c} : nullptr;
   if (!e) {
     ASYNC_TCP_CONSOLE_E("Failed to allocate event packet");
     if (slot) {
@@ -648,7 +648,7 @@ err_t AsyncTCP_detail::tcp_poll(void *arg, struct tcp_pcb *pcb) {
 err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb, err_t err) {
   AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
   bool slot = _is_client_slot_valid(c);
-  lwip_tcp_event_packet_t *e = (slot) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_RECV, c} : nullptr;
+  lwip_tcp_event_packet_t *e = (slot && c->_pcb == pcb) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_RECV, c} : nullptr;
   if (!e) {
     ASYNC_TCP_CONSOLE_E("Failed to allocate event packet");
     if (pb) {
@@ -699,7 +699,7 @@ err_t AsyncTCP_detail::tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *pb,
 err_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
   AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
   bool slot = _is_client_slot_valid(c);
-  lwip_tcp_event_packet_t *e = (c) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_SENT, c} : nullptr;
+  lwip_tcp_event_packet_t *e = (slot && c->_pcb == pcb) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_SENT, c} : nullptr;
   if (!e) {
     ASYNC_TCP_CONSOLE_E("Failed to allocate event packet");
     if (slot) {
@@ -720,8 +720,9 @@ err_t AsyncTCP_detail::tcp_sent(void *arg, struct tcp_pcb *pcb, uint16_t len) {
 
 void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
   AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
-  ASYNC_TCP_CONSOLE_E("%u Connection aborted or reset, err = %s", arg, c->errorToString(err));
+  ASYNC_TCP_CONSOLE_E("Client %u Connection aborted or reset, err = %s", c, c->errorToString(err));
   if (_is_client_slot_valid(c)) {
+    ASYNC_TCP_CONSOLE_E("Removed client %u", c);
     _remove_events_for_client(c);
     c->_pcb = nullptr;
     c->_slot = INVALID_CLIENT_SLOT;
@@ -744,9 +745,9 @@ void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
 
 void AsyncTCP_detail::_tcp_dns_found(const char *name, const ip_addr_t *ipaddr, void *arg) {
   ASYNC_TCP_CONSOLE_I("+DNS: name=%s ipaddr=0x%08x arg=%x\n", name, ipaddr, arg);
-  AsyncClient *client = reinterpret_cast<AsyncClient *>(arg);
+  AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
 
-  lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DNS, client};
+  lwip_tcp_event_packet_t *e = (c) ? new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DNS, c} : nullptr;
   if (!e) {
     ASYNC_TCP_CONSOLE_E("Failed to allocate event packet");
     return;
@@ -756,6 +757,7 @@ void AsyncTCP_detail::_tcp_dns_found(const char *name, const ip_addr_t *ipaddr, 
   if (ipaddr) {
     memcpy(&e->dns.addr, ipaddr, sizeof(ip_addr_t));
   } else {
+    ASYNC_TCP_CONSOLE_E("Failed to found DNS address for %s", name);
     e->dns.addr.type = IPADDR_TYPE_ANY + 1;  // not IPv4 or IPv6 or IPv4+IPv6, @ref lwip_ip_addr_type
   }
 
@@ -1033,7 +1035,7 @@ AsyncClient::AsyncClient(tcp_pcb *pcb, AsyncServer *server)
       _id_disconnect = INVALID_CLIENT_EVENT_ID;
       _slot = INVALID_CLIENT_SLOT;
       _client_count++;
-      ASYNC_TCP_CONSOLE_I("New client %u, server %u, disconnect id = %d, total = %u", this, _server, _id_disconnect, _client_count);
+      ASYNC_TCP_CONSOLE_I("New client %u, server %u, _client_count = %u", this, _server, _client_count);
       if (_pcb) {
         _rx_last_packet = millis();
       }
@@ -1041,7 +1043,7 @@ AsyncClient::AsyncClient(tcp_pcb *pcb, AsyncServer *server)
 
 AsyncClient::~AsyncClient() {
   _client_count--;
-  ASYNC_TCP_CONSOLE_I("Delete client %u, total = %u", this, _client_count);
+  ASYNC_TCP_CONSOLE_I("Delete client %u, _client_count = %u", this, _client_count);
   _server = nullptr;
   resetCallback();  // avoid any recursive callback
   if (_is_pcb_slot_valid(_slot, _pcb)) {
@@ -1492,6 +1494,7 @@ err_t AsyncClient::_sent(tcp_pcb *pcb, uint16_t len) {
 err_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, err_t err) {
   while (pb != NULL) {
     _rx_last_packet = millis();
+    ASYNC_TCP_CONSOLE_I("C %u len = %u/%u", this, pb->len, pb->tot_len);
     // we should not ack before we assimilate the data
     // _ack_pcb = true; // It is always true with whenever new client established. It should not force true here due to the ackLater() will not be valid anymore
     pbuf *b = pb;
