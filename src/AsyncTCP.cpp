@@ -321,22 +321,23 @@ static SimpleIntrusiveList<lwip_tcp_event_packet_t> _async_queue;
 static TaskHandle_t _async_service_task_handle = NULL;
 
 static void _free_event(lwip_tcp_event_packet_t *e) {
+  ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
   if ((e->event == LWIP_TCP_RECV) && e->recv.pb) {
-    pbuf *pb = e->recv.pb;
-    ASYNC_TCP_CONSOLE_E("Free ev: client %u pb = %u ref = %u", e->client, pb, pb->ref);
-    pbuf_free(pb);
+    pbuf_free(e->recv.pb);
   }
   delete e;
 }
 
 static inline void _send_async_event(lwip_tcp_event_packet_t *e) {
   assert(e != nullptr);
+  ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
   _async_queue.push_back(e);
   xTaskNotifyGive(_async_service_task_handle);
 }
 
 static inline void _prepend_async_event(lwip_tcp_event_packet_t *e) {
   assert(e != nullptr);
+  ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
   _async_queue.push_front(e);
   xTaskNotifyGive(_async_service_task_handle);
 }
@@ -384,7 +385,7 @@ static inline lwip_tcp_event_packet_t *_get_async_event() {
   }
 }
 
-static void _remove_events_for_client(AsyncClient *client) {
+static u8_t _remove_events_for_client(AsyncClient *client) {
   lwip_tcp_event_packet_t *removed_event_chain;
   {
     queue_mutex_guard guard;
@@ -393,11 +394,16 @@ static void _remove_events_for_client(AsyncClient *client) {
     });
   }
 
+  u8_t removed_count = SimpleIntrusiveList<lwip_tcp_event_packet_t>::list_size(removed_event_chain);
+  if (removed_count > 0) {
+    ASYNC_TCP_CONSOLE_I("Removed %u events for client %u", removed_count, client);
+  }
   while (removed_event_chain) {
     auto t = removed_event_chain;
     removed_event_chain = t->next;
     _free_event(t);
   }
+  return removed_count;
 };
 
 void AsyncTCP_detail::handle_async_event(lwip_tcp_event_packet_t *e) {
@@ -1041,6 +1047,9 @@ AsyncClient::AsyncClient(tcp_pcb *pcb, AsyncServer *server)
       }
     }
 
+/**
+ * Should be called the deleting client only in Async thread
+ * */
 AsyncClient::~AsyncClient() {
   _client_count--;
   ASYNC_TCP_CONSOLE_I("Delete client %u, _client_count = %u", this, _client_count);
@@ -1049,7 +1058,10 @@ AsyncClient::~AsyncClient() {
   if (_is_pcb_slot_valid(_slot, _pcb)) {
     ASYNC_TCP_CONSOLE_I("client %u call _close()", this);
     _close(); // client is closed directly in lwIP thread
-    _remove_events_for_client(this);
+  }
+  u8_t removed_count = _remove_events_for_client(this); // remove all events for this client from the queue before deleting it
+  if (removed_count == 0) {
+    ASYNC_TCP_CONSOLE_I("No events to remove for client %u", this);
   }
 }
 
@@ -1211,7 +1223,12 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
  * close() --> onDisconnect() --> ~AsyncClient()
 */
 void AsyncClient::close(bool now) {
-  ASYNC_TCP_CONSOLE_I("client %u, now = %u", this, now);
+  if (_is_pcb_slot_valid(_slot, _pcb)) {
+    ASYNC_TCP_CONSOLE_I("client %u call close(%u)", this, now);
+  } else {
+    ASYNC_TCP_CONSOLE_I("client %u already closed", this);
+    return;
+  }
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DISCONNECT, this};
   if (!e) {
     ASYNC_TCP_CONSOLE_E("Failed to allocate event packet");
@@ -1241,6 +1258,14 @@ void AsyncClient::close(bool now) {
 */
 err_t AsyncClient::abort() {
   ASYNC_TCP_CONSOLE_I("client %u", this);
+  if (_is_pcb_slot_valid(_slot, _pcb)) {
+    ASYNC_TCP_CONSOLE_I("client %u call abort()", this);
+    // client is not closed, so we can abort it.
+  } else {
+    ASYNC_TCP_CONSOLE_I("client %u already closed", this);
+    // client is already closed, no need to do anything.
+    return ERR_ABRT;
+  }
   _remove_events_for_client(this);
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DISCONNECT, this};
   if (!e) {
