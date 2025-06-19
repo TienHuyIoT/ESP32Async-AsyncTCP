@@ -54,7 +54,7 @@ extern "C" {
 #endif
 
 AsyncConsole AsyncTCPConsole;
-#define ASYNC_TCP_CONSOLE_I(f_, ...)  AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
+#define ASYNC_TCP_CONSOLE_I(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
 #define ASYNC_TCP_CONSOLE_E(f_, ...)  AsyncTCPConsole.printf_P(PSTR("E [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
 
 // Required for:
@@ -116,8 +116,8 @@ static err_t _tcp_output(struct tcpip_api_call_data *api_call_msg);
 static esp_err_t _tcp_write(tcp_pcb *pcb, s8_t client_slot, const char *data, size_t size, uint8_t apiflags);
 static esp_err_t _tcp_recved(tcp_pcb *pcb, s8_t client_slot, size_t len);
 static esp_err_t _lwip_callback(tcp_abort_callback cb, void *arg);
-static esp_err_t _tcp_close(tcp_pcb *pcb, s8_t client_slot, tcp_close_callback cb, void *arg);
-static esp_err_t _tcp_abort(tcp_pcb *pcb, s8_t client_slot, tcp_abort_callback cb, void *arg);
+// static esp_err_t _tcp_close(tcp_pcb *pcb, s8_t client_slot, tcp_close_callback cb, void *arg);
+// static esp_err_t _tcp_abort(tcp_pcb *pcb, s8_t client_slot, tcp_abort_callback cb, void *arg);
 static esp_err_t _tcp_connect(tcp_pcb *pcb, s8_t client_slot, ip_addr_t *addr, uint16_t port, tcp_connected_fn cb, void *arg);
 static esp_err_t _dns_gethostbyname(const char *hostname, ip_addr_t *addr, dns_found_callback found, void *arg);
 static tcp_pcb *_tcp_new_ip_type(u8_t type);
@@ -127,17 +127,17 @@ static tcp_pcb *_tcp_new_ip_type(u8_t type);
  * */
 
 typedef enum {
-  LWIP_TCP_NONE,
-  LWIP_TCP_SENT,
-  LWIP_TCP_RECV,
-  LWIP_TCP_FIN,
-  LWIP_TCP_DISCONNECT,
-  LWIP_TCP_ERROR,
-  LWIP_TCP_POLL,
-  LWIP_TCP_ACCEPT,
-  LWIP_TCP_CONNECTED,
-  LWIP_TCP_DNS,
-  LWIP_TCP_CALLBACK
+  /*00*/ LWIP_TCP_NONE,
+  /*01*/ LWIP_TCP_SENT,
+  /*02*/ LWIP_TCP_RECV,
+  /*03*/ LWIP_TCP_FIN,
+  /*04*/ LWIP_TCP_DISCONNECT,
+  /*05*/ LWIP_TCP_ERROR,
+  /*06*/ LWIP_TCP_POLL,
+  /*07*/ LWIP_TCP_ACCEPT,
+  /*08*/ LWIP_TCP_CONNECTED,
+  /*09*/ LWIP_TCP_DNS,
+  /*10*/ LWIP_TCP_CALLBACK
 } lwip_tcp_event_t;
 
 struct lwip_tcp_event_packet_t {
@@ -394,11 +394,10 @@ static u8_t _remove_events_for_client(AsyncClient *client) {
     });
   }
 
-  u8_t removed_count = SimpleIntrusiveList<lwip_tcp_event_packet_t>::list_size(removed_event_chain);
-  if (removed_count > 0) {
-    ASYNC_TCP_CONSOLE_I("Removed %u events for client %u", removed_count, client);
-  }
+  u8_t removed_count = 0;
+  // removed_count = SimpleIntrusiveList<lwip_tcp_event_packet_t>::list_size(removed_event_chain);
   while (removed_event_chain) {
+    ++removed_count;
     auto t = removed_event_chain;
     removed_event_chain = t->next;
     _free_event(t);
@@ -890,6 +889,7 @@ static esp_err_t _tcp_recved(tcp_pcb *pcb, int8_t client_slot, size_t len) {
   return msg.err;
 }
 
+#if (0)
 static err_t _tcp_close_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
@@ -916,7 +916,9 @@ static esp_err_t _tcp_close(tcp_pcb *pcb, s8_t client_slot, tcp_close_callback c
   tcpip_api_call(_tcp_close_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
 }
+#endif
 
+#if (0)
 static err_t _tcp_abort_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
   msg->err = ERR_CONN;
@@ -940,6 +942,7 @@ static esp_err_t _tcp_abort(tcp_pcb *pcb, s8_t client_slot, tcp_abort_callback c
   tcpip_api_call(_tcp_close_api, (struct tcpip_api_call_data *)&msg);
   return msg.err;
 }
+#endif
 
 static err_t _lwip_callback_api(struct tcpip_api_call_data *api_call_msg) {
   tcp_api_call_t *msg = (tcp_api_call_t *)api_call_msg;
@@ -1062,6 +1065,8 @@ AsyncClient::~AsyncClient() {
   u8_t removed_count = _remove_events_for_client(this); // remove all events for this client from the queue before deleting it
   if (removed_count == 0) {
     ASYNC_TCP_CONSOLE_I("No events to remove for client %u", this);
+  } else {
+    ASYNC_TCP_CONSOLE_I("Removed %u events for client %u", removed_count, this);
   }
 }
 
@@ -1287,8 +1292,14 @@ size_t AsyncClient::space() {
   if (_pcb && (_pcb->state == ESTABLISHED)) {
     _lwip_callback([](void *arg)->err_t {
       AsyncClient *c = (AsyncClient *)arg;
-      c->_space = tcp_sndbuf(c->_pcb);
-      return ERR_OK;
+      err_t err = ERR_CONN;
+      if (_is_pcb_slot_valid(c->_slot, c->_pcb)) {
+        c->_space = tcp_sndbuf(c->_pcb);
+        err = ERR_OK;
+      } else {
+        ASYNC_TCP_CONSOLE_E("client %u already closed", c);
+      }
+      return err;
     }, this);
   }
   return _space;
@@ -1360,7 +1371,7 @@ err_t AsyncClient::_close() {
     // run in LwIP thread
     AsyncClient *c = (AsyncClient *)arg;
     err_t err = ERR_CONN;
-    if (c->_pcb) {
+    if (_is_pcb_slot_valid(c->_slot, c->_pcb)) {
       _reset_tcp_callbacks(c->_pcb, c); // It has to be called before tcp_close();
       err = tcp_close(c->_pcb);
       if (err != ERR_OK) {
@@ -1368,9 +1379,9 @@ err_t AsyncClient::_close() {
         tcp_abort(c->_pcb);
         err = ERR_ABRT;
       }
+      c->_pcb = nullptr;
+      c->_slot = INVALID_CLIENT_SLOT;
     }
-    c->_pcb = nullptr;
-    c->_slot = INVALID_CLIENT_SLOT;
     _unregister_client_slot(c);
     return err;
   }, this);
@@ -1394,15 +1405,15 @@ err_t AsyncClient::_abort() {
   err = _lwip_callback([](void *arg)->err_t {
     // run in LwIP thread
     AsyncClient *c = (AsyncClient *)arg;
-    err_t err = ERR_OK;
+    err_t err = ERR_CONN;
     _remove_events_for_client(c);
-    if (c->_pcb) {
+    if (_is_pcb_slot_valid(c->_slot, c->_pcb)) {
       _reset_tcp_callbacks(c->_pcb, c); // It has to be called before tcp_abort();
       tcp_abort(c->_pcb);
       err = ERR_ABRT;
+      c->_pcb = nullptr;
+      c->_slot = INVALID_CLIENT_SLOT;
     }
-    c->_pcb = nullptr;
-    c->_slot = INVALID_CLIENT_SLOT;
     _unregister_client_slot(c);
     return err;
   }, this);
