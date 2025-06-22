@@ -1966,7 +1966,7 @@ void AsyncServer::onClient(AcConnectHandler cb, void *arg) {
   _connect_cb_arg = arg;
 }
 
-bool AsyncServer::begin() {
+bool AsyncServer::begin(uint16_t port) {
   if (_listen_pcb) {
     return true;
   }
@@ -1974,6 +1974,10 @@ bool AsyncServer::begin() {
   if (!_start_async_task()) {
     ASYNC_TCP_CONSOLE_E("failed to start task");
     return false;
+  }
+
+  if (port != 0) {
+    _port = port;
   }
 
   // Safely to run in the LwIP thread

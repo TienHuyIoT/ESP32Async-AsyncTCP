@@ -350,7 +350,7 @@ public:
   AsyncServer(uint16_t port);
   ~AsyncServer();
   void onClient(AcConnectHandler cb, void *arg);
-  bool begin();
+  bool begin(uint16_t port = 0);
   void end();
   void setNoDelay(bool nodelay);
   bool getNoDelay() const;
