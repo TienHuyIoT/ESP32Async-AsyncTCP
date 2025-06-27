@@ -318,7 +318,7 @@ static bool _is_pcb_slot_valid(s8_t slot, tcp_pcb *pcb) {
  * Event management
 */
 static SimpleIntrusiveList<lwip_tcp_event_packet_t> _async_queue;
-static TaskHandle_t _async_service_task_handle = NULL;
+TaskHandle_t _async_service_task_handle = NULL;
 
 static void _free_event(lwip_tcp_event_packet_t *e) {
   ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);

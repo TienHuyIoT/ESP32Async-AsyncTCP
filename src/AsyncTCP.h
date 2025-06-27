@@ -13,6 +13,7 @@
 #endif
 
 #ifdef ARDUINO
+#include "Arduino.h"
 #include "IPAddress.h"
 #if __has_include(<IPv6Address.h>)
 #include "IPv6Address.h"
@@ -50,19 +51,19 @@ extern "C" {
 #endif
 
 #ifndef CONFIG_ASYNC_TCP_STACK_SIZE
-#define CONFIG_ASYNC_TCP_STACK_SIZE 1024 * 5
+#define CONFIG_ASYNC_TCP_STACK_SIZE (1024U * 5)
 #endif
 
 #ifndef CONFIG_ASYNC_TCP_PRIORITY
-#define CONFIG_ASYNC_TCP_PRIORITY 10
+#define CONFIG_ASYNC_TCP_PRIORITY 10U
 #endif
 
 #ifndef CONFIG_ASYNC_TCP_QUEUE_SIZE
-#define CONFIG_ASYNC_TCP_QUEUE_SIZE 128
+#define CONFIG_ASYNC_TCP_QUEUE_SIZE 64U
 #endif
 
 #ifndef CONFIG_ASYNC_TCP_MAX_ACK_TIME
-#define CONFIG_ASYNC_TCP_MAX_ACK_TIME 5000
+#define CONFIG_ASYNC_TCP_MAX_ACK_TIME 5000U
 #endif
 
 #ifndef ASYNC_TCP_CALLBACK_IMPL
@@ -83,6 +84,7 @@ typedef std::function<void(void *, AsyncClient *, void *data, size_t len)> AcDat
 typedef std::function<void(void *, AsyncClient *, struct pbuf *pb)> AcPacketHandler;
 typedef std::function<void(void *, AsyncClient *, uint32_t time)> AcTimeoutHandler;
 
+extern TaskHandle_t _async_service_task_handle; // expose task handler
 extern AsyncConsole AsyncTCPConsole;
 /** Function prototype for functions passed to asynctcp_callback() */
 typedef void (*asynctcp_callback_fn)(void *ctx);
