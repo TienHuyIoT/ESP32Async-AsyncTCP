@@ -321,7 +321,7 @@ static SimpleIntrusiveList<lwip_tcp_event_packet_t> _async_queue;
 TaskHandle_t _async_service_task_handle = NULL;
 
 static void _free_event(lwip_tcp_event_packet_t *e) {
-  ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
+  // ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
   if ((e->event == LWIP_TCP_RECV) && e->recv.pb) {
     pbuf_free(e->recv.pb);
   }
@@ -330,14 +330,14 @@ static void _free_event(lwip_tcp_event_packet_t *e) {
 
 static inline void _send_async_event(lwip_tcp_event_packet_t *e) {
   assert(e != nullptr);
-  ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
+  // ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
   _async_queue.push_back(e);
   xTaskNotifyGive(_async_service_task_handle);
 }
 
 static inline void _prepend_async_event(lwip_tcp_event_packet_t *e) {
   assert(e != nullptr);
-  ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
+  // ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
   _async_queue.push_front(e);
   xTaskNotifyGive(_async_service_task_handle);
 }
@@ -641,6 +641,7 @@ err_t AsyncTCP_detail::tcp_poll(void *arg, struct tcp_pcb *pcb) {
   }
   e->poll.pcb = pcb;
 
+  ASYNC_TCP_CONSOLE_I("Client %u", c);
   queue_mutex_guard guard;
   _send_async_event(e);
   return ERR_OK;
@@ -1521,6 +1522,7 @@ err_t AsyncClient::_fin(tcp_pcb *pcb, err_t err) {
 
 err_t AsyncClient::_sent(tcp_pcb *pcb, uint16_t len) {
   _rx_last_ack = _rx_last_packet = millis();
+  // ASYNC_TCP_CONSOLE_I("_rx_last_packet %u", _rx_last_packet);
   if (_sent_cb) {
     _sent_cb(_sent_cb_arg, this, len, (_rx_last_packet - _tx_last_packet));
   }
@@ -1564,6 +1566,7 @@ err_t AsyncClient::_poll(tcp_pcb *pcb) {
   }
 
   uint32_t now = millis();
+  ASYNC_TCP_CONSOLE_I("Client %u pcb %u, _rx_timeout %u, now %u, _rx_last_packet %u", this, pcb, _rx_timeout, now, _rx_last_packet);
 
   // ACK Timeout
   if (_ack_timeout) {
@@ -1579,7 +1582,7 @@ err_t AsyncClient::_poll(tcp_pcb *pcb) {
   }
   // RX Timeout
   if (_rx_timeout && (now - _rx_last_packet) >= (_rx_timeout * 1000)) {
-    ASYNC_TCP_CONSOLE_E("Client %u: rx timeout %d", this, pcb->state);
+    ASYNC_TCP_CONSOLE_E("Client %u: rx timeout with pcb state %d", this, pcb->state);
     _close(); // client shall be closed directly in lwIP thread
     _remove_events_for_client(this);
     _error(ERR_TIMEOUT);
