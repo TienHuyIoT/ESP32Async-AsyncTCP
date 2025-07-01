@@ -56,6 +56,7 @@ extern "C" {
 AsyncConsole AsyncTCPConsole;
 #define ASYNC_TCP_CONSOLE_I(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
 #define ASYNC_TCP_CONSOLE_E(f_, ...)  AsyncTCPConsole.printf_P(PSTR("E [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
+#define ASYNC_TCP_CONSOLE_W(f_, ...)  AsyncTCPConsole.printf_P(PSTR("[AsyncTCP] " f_ "\r\n"), ##__VA_ARGS__)
 
 // Required for:
 // https://github.com/espressif/arduino-esp32/blob/3.0.3/libraries/Network/src/NetworkInterface.cpp#L37-L47
@@ -308,8 +309,6 @@ static bool _is_pcb_slot_valid(s8_t slot, tcp_pcb *pcb) {
   if (slot != INVALID_CLIENT_SLOT && slot < CONFIG_LWIP_MAX_ACTIVE_TCP) {
     AsyncClient *c = _clients[slot];
     return (c && c->_pcb == pcb);
-  } else {
-    // ASYNC_TCP_CONSOLE_I("Error due to Slot = %d", slot);
   }
   return false;
 }
@@ -321,7 +320,7 @@ static SimpleIntrusiveList<lwip_tcp_event_packet_t> _async_queue;
 TaskHandle_t _async_service_task_handle = NULL;
 
 static void _free_event(lwip_tcp_event_packet_t *e) {
-  // ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
+  // ASYNC_TCP_CONSOLE_I("ev %u: c %u event %u", e, e->client, e->event);
   if ((e->event == LWIP_TCP_RECV) && e->recv.pb) {
     pbuf_free(e->recv.pb);
   }
@@ -330,14 +329,14 @@ static void _free_event(lwip_tcp_event_packet_t *e) {
 
 static inline void _send_async_event(lwip_tcp_event_packet_t *e) {
   assert(e != nullptr);
-  // ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
+  // ASYNC_TCP_CONSOLE_I("ev %u: c %u event %u", e, e->client, e->event);
   _async_queue.push_back(e);
   xTaskNotifyGive(_async_service_task_handle);
 }
 
 static inline void _prepend_async_event(lwip_tcp_event_packet_t *e) {
   assert(e != nullptr);
-  // ASYNC_TCP_CONSOLE_I("ev %u: client %u event %u", e, e->client, e->event);
+  // ASYNC_TCP_CONSOLE_I("ev %u: c %u event %u", e, e->client, e->event);
   _async_queue.push_front(e);
   xTaskNotifyGive(_async_service_task_handle);
 }
@@ -556,7 +555,7 @@ err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *c_pcb, err_t err) {
   s8_t slot = (e) ? _register_client_slot(c) : INVALID_CLIENT_SLOT;
   bool accepted = (slot != INVALID_CLIENT_SLOT && s->_listen_connect_cb) ? true : false;
   
-  ASYNC_TCP_CONSOLE_I("New pcb: %u, err = %d, client %u", c_pcb, err, c);
+  ASYNC_TCP_CONSOLE_I("New pcb: %u, err = %d, c %u", c_pcb, err, c);
   if (!accepted) {
     ASYNC_TCP_CONSOLE_E("Accept failed: %d", err);
 
@@ -728,7 +727,7 @@ void AsyncTCP_detail::tcp_error(void *arg, err_t err) {
   AsyncClient *c = reinterpret_cast<AsyncClient *>(arg);
   ASYNC_TCP_CONSOLE_E("Client %u Connection aborted or reset, err = %s", c, c->errorToString(err));
   if (_is_client_slot_valid(c)) {
-    ASYNC_TCP_CONSOLE_E("Removed client %u", c);
+    ASYNC_TCP_CONSOLE_E("Removed c %u", c);
     _remove_events_for_client(c);
     c->_pcb = nullptr;
     c->_slot = INVALID_CLIENT_SLOT;
@@ -1045,7 +1044,7 @@ AsyncClient::AsyncClient(tcp_pcb *pcb, AsyncServer *server)
       _id_disconnect = INVALID_CLIENT_EVENT_ID;
       _slot = INVALID_CLIENT_SLOT;
       _client_count++;
-      ASYNC_TCP_CONSOLE_I("New client %u, server %u, _client_count = %u", this, _server, _client_count);
+      ASYNC_TCP_CONSOLE_W("New c %u, ct = %u", this, _client_count);
       if (_pcb) {
         _rx_last_packet = millis();
       }
@@ -1056,18 +1055,18 @@ AsyncClient::AsyncClient(tcp_pcb *pcb, AsyncServer *server)
  * */
 AsyncClient::~AsyncClient() {
   _client_count--;
-  ASYNC_TCP_CONSOLE_I("Delete client %u, _client_count = %u", this, _client_count);
+  ASYNC_TCP_CONSOLE_W("Del c %u, ct = %u", this, _client_count);
   _server = nullptr;
   resetCallback();  // avoid any recursive callback
   if (_is_pcb_slot_valid(_slot, _pcb)) {
-    ASYNC_TCP_CONSOLE_I("client %u call _close()", this);
+    ASYNC_TCP_CONSOLE_I("c %u call _close()", this);
     _close(); // client is closed directly in lwIP thread
   }
   u8_t removed_count = _remove_events_for_client(this); // remove all events for this client from the queue before deleting it
   if (removed_count == 0) {
-    ASYNC_TCP_CONSOLE_I("No events to remove for client %u", this);
+    ASYNC_TCP_CONSOLE_I("No events to remove for c %u", this);
   } else {
-    ASYNC_TCP_CONSOLE_I("Removed %u events for client %u", removed_count, this);
+    ASYNC_TCP_CONSOLE_E("Removed %u events for c %u", removed_count, this);
   }
 }
 
@@ -1139,7 +1138,7 @@ bool AsyncClient::connect(ip_addr_t addr, uint16_t port) {
   ASYNC_TCP_CONSOLE_I("Client %u Ip = %s port: %u", this, ipaddr_ntoa(&addr), port);
 
   if (_client_slot_available() == INVALID_CLIENT_SLOT) {
-    ASYNC_TCP_CONSOLE_E("client slot full");
+    ASYNC_TCP_CONSOLE_E("c slot full");
     return false;
   }
   
@@ -1230,9 +1229,9 @@ bool AsyncClient::connect(const char *host, uint16_t port) {
 */
 void AsyncClient::close(bool now) {
   if (_is_pcb_slot_valid(_slot, _pcb)) {
-    ASYNC_TCP_CONSOLE_I("client %u call close(%u)", this, now);
+    ASYNC_TCP_CONSOLE_I("c %u call close(%u)", this, now);
   } else {
-    ASYNC_TCP_CONSOLE_I("client %u already closed", this);
+    ASYNC_TCP_CONSOLE_I("c %u already closed", this);
     return;
   }
   lwip_tcp_event_packet_t *e = new (std::nothrow) lwip_tcp_event_packet_t{LWIP_TCP_DISCONNECT, this};
@@ -1263,12 +1262,12 @@ void AsyncClient::close(bool now) {
  * abort() -->onDisconnect() --> ~AsyncClient()
 */
 err_t AsyncClient::abort() {
-  ASYNC_TCP_CONSOLE_I("client %u", this);
+  ASYNC_TCP_CONSOLE_I("c %u", this);
   if (_is_pcb_slot_valid(_slot, _pcb)) {
-    ASYNC_TCP_CONSOLE_I("client %u call abort()", this);
+    ASYNC_TCP_CONSOLE_I("c %u call abort()", this);
     // client is not closed, so we can abort it.
   } else {
-    ASYNC_TCP_CONSOLE_I("client %u already closed", this);
+    ASYNC_TCP_CONSOLE_I("c %u already closed", this);
     // client is already closed, no need to do anything.
     return ERR_ABRT;
   }
@@ -1298,7 +1297,7 @@ size_t AsyncClient::space() {
         c->_space = tcp_sndbuf(c->_pcb);
         err = ERR_OK;
       } else {
-        ASYNC_TCP_CONSOLE_E("client %u already closed", c);
+        ASYNC_TCP_CONSOLE_E("c %u already closed", c);
       }
       return err;
     }, this);
@@ -1308,16 +1307,19 @@ size_t AsyncClient::space() {
 
 size_t AsyncClient::add(const char *data, size_t size, uint8_t apiflags) {
   if (!_pcb || size == 0 || data == NULL) {
+    ASYNC_TCP_CONSOLE_E("c %u pcb null", this);
     return 0;
   }
   size_t room = space();
   if (!room) {
+    ASYNC_TCP_CONSOLE_E("c %u space 0", this);
     return 0;
   }
   size_t will_send = (room < size) ? room : size;
   err_t err = ERR_OK;
   err = _tcp_write(_pcb, _slot, data, will_send, apiflags);
   if (err != ERR_OK) {
+    ASYNC_TCP_CONSOLE_E("c %u Err %d", this, err);
     return 0;
   }
   return will_send;
@@ -1326,8 +1328,11 @@ size_t AsyncClient::add(const char *data, size_t size, uint8_t apiflags) {
 bool AsyncClient::send() {
   auto backup = _tx_last_packet;
   _tx_last_packet = millis();
-  if (_tcp_output(_pcb, _slot) == ERR_OK) {
+  err_t err = _tcp_output(_pcb, _slot);
+  if (err == ERR_OK) {
     return true;
+  } else {
+    ASYNC_TCP_CONSOLE_E("c %u Err %d", this, err);
   }
   _tx_last_packet = backup;
   return false;
@@ -1354,7 +1359,7 @@ void AsyncClient::ackPacket(struct pbuf *pb) {
  * */
 
 err_t AsyncClient::_close() {
-  ASYNC_TCP_CONSOLE_I("client %u", this);
+  ASYNC_TCP_CONSOLE_I("c %u", this);
   err_t err = ERR_OK;
 #if (0)
   err = _tcp_close(_pcb, _slot, [](void *arg, err_t err) {
@@ -1391,7 +1396,7 @@ err_t AsyncClient::_close() {
 }
 
 err_t AsyncClient::_abort() {
-  ASYNC_TCP_CONSOLE_I("client %u", this);
+  ASYNC_TCP_CONSOLE_I("c %u", this);
   err_t err = ERR_OK;
 #if (0)
   err = _tcp_abort(_pcb, _slot, [](void *arg) {
@@ -1441,7 +1446,7 @@ bool AsyncClient::valid() {
  * Private Callbacks
  * */
 err_t AsyncClient::_connected(tcp_pcb *pcb) {
-  ASYNC_TCP_CONSOLE_I("client %u", this);
+  ASYNC_TCP_CONSOLE_I("c %u", this);
   if (_pcb) {
     _rx_last_packet = millis();
   }
@@ -1454,7 +1459,7 @@ err_t AsyncClient::_connected(tcp_pcb *pcb) {
 }
 
 void AsyncClient::_disconnect(err_t err) {
-  ASYNC_TCP_CONSOLE_I("client %u err = %d", this, err);
+  ASYNC_TCP_CONSOLE_I("c %u err = %d", this, err);
   if (ERR_ISCONN == err) {
     _close(); // close client in lwIP thread 
   }
@@ -1469,12 +1474,12 @@ void AsyncClient::_disconnect(err_t err) {
   } else if (_server) {
     _server->_handleDisconnect(this); // notify server about client disconnect
   } else {
-    ASYNC_TCP_CONSOLE_I("No discard callback, client %u", this);
+    ASYNC_TCP_CONSOLE_I("No discard callback, c %u", this);
   }
 }
 
 void AsyncClient::_error(err_t err) {
-  ASYNC_TCP_CONSOLE_I("client %u", this);
+  ASYNC_TCP_CONSOLE_I("c %u", this);
   if (_error_cb) {
     _error_cb(_error_cb_arg, this, err);
   }
@@ -1515,7 +1520,7 @@ err_t AsyncClient::_lwip_close(tcp_pcb *pcb) {
 
 // In Async Thread
 err_t AsyncClient::_fin(tcp_pcb *pcb, err_t err) {
-  ASYNC_TCP_CONSOLE_I("client %u", this);
+  ASYNC_TCP_CONSOLE_I("c %u", this);
   _disconnect(ERR_CLSD);
   return ERR_OK;
 }
@@ -1583,7 +1588,7 @@ err_t AsyncClient::_poll(tcp_pcb *pcb) {
   // RX Timeout
   if (_rx_timeout && (now - _rx_last_packet) >= (_rx_timeout * 1000)) {
     ASYNC_TCP_CONSOLE_E("Client %u: rx timeout with pcb state %d", this, pcb->state);
-    _close(); // client shall be closed directly in lwIP thread
+    _abort(); // client shall be aborted directly in lwIP thread
     _remove_events_for_client(this);
     _error(ERR_TIMEOUT);
     return ERR_OK;
@@ -2006,7 +2011,7 @@ bool AsyncServer::begin(uint16_t port) {
       return ERR_ABRT;
     }
 
-    constexpr uint8_t backlog = CONFIG_LWIP_MAX_ACTIVE_TCP / 2; // up to you
+    constexpr uint8_t backlog = CONFIG_LWIP_MAX_LISTENING_TCP;
     server->_listen_pcb = tcp_listen_with_backlog(server->_listen_pcb, backlog);
     if (!server->_listen_pcb) {
       ASYNC_TCP_CONSOLE_E("listen_pcb == NULL");
@@ -2096,10 +2101,12 @@ err_t AsyncServer::_accepted(AsyncClient *client) {
 void AsyncServer::_handleDisconnect(AsyncClient *client) {
   if (client) {
     if (client->_id_disconnect != INVALID_CLIENT_EVENT_ID) {
-      ASYNC_TCP_CONSOLE_I("Server %u handle disconnect for client %u id = %u", this, client, client->_id_disconnect);
+      ASYNC_TCP_CONSOLE_I("s %u handle disconnect for c %u id = %u", this, client, client->_id_disconnect);
       xEventGroupSetBits(_disconnect_events, 1U << client->_id_disconnect);
     }
+#if (ASYNC_TCP_DELETION_HANDLE == 1)
     delete client;
+#endif
   }
 }
 

@@ -69,7 +69,8 @@ extern "C" {
 #ifndef ASYNC_TCP_CALLBACK_IMPL
 #define ASYNC_TCP_CALLBACK_IMPL 1
 #endif
-#define ASYNC_TCP_RECVED_IN_LWIP 1
+
+#define ASYNC_TCP_DELETION_HANDLE 1
 
 class AsyncServer;
 class AsyncClient;
