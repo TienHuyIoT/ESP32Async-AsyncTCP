@@ -320,8 +320,8 @@ static SimpleIntrusiveList<lwip_tcp_event_packet_t> _async_queue;
 TaskHandle_t _async_service_task_handle = NULL;
 
 static void _free_event(lwip_tcp_event_packet_t *e) {
-  // ASYNC_TCP_CONSOLE_I("ev %u: c %u event %u", e, e->client, e->event);
   if ((e->event == LWIP_TCP_RECV) && e->recv.pb) {
+    ASYNC_TCP_CONSOLE_E("ev %u: c %u event %u len %u", e, e->client, e->event, e->recv.pb->tot_len);
     pbuf_free(e->recv.pb);
   }
   delete e;
