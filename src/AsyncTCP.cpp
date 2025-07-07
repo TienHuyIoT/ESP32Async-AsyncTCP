@@ -54,9 +54,6 @@ extern "C" {
 #endif
 
 AsyncConsole AsyncTCPConsole;
-#define ASYNC_TCP_CONSOLE_I(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
-#define ASYNC_TCP_CONSOLE_E(f_, ...)  AsyncTCPConsole.printf_P(PSTR("E [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
-#define ASYNC_TCP_CONSOLE_W(f_, ...)  AsyncTCPConsole.printf_P(PSTR("W [AsyncTCP] " f_ "\r\n"), ##__VA_ARGS__)
 
 // Required for:
 // https://github.com/espressif/arduino-esp32/blob/3.0.3/libraries/Network/src/NetworkInterface.cpp#L37-L47
@@ -2043,7 +2040,7 @@ void AsyncServer::end() {
       _disconnect_events, _wait_events,
       pdFALSE, // unclear bits on exit
       pdTRUE,  // all bits
-      pdMS_TO_TICKS(5000) // wait for 1s
+      pdMS_TO_TICKS(5000) // wait for 5s
     );
     ASYNC_TCP_CONSOLE_I("Server %u closed all clients, bits = %08X", this, bits);
   }

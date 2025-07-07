@@ -87,6 +87,10 @@ typedef std::function<void(void *, AsyncClient *, uint32_t time)> AcTimeoutHandl
 
 extern TaskHandle_t _async_service_task_handle; // expose task handler
 extern AsyncConsole AsyncTCPConsole;
+#define ASYNC_TCP_CONSOLE_I(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
+#define ASYNC_TCP_CONSOLE_E(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("E [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
+#define ASYNC_TCP_CONSOLE_W(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("W [AsyncTCP] " f_ "\r\n"), ##__VA_ARGS__)
+
 /** Function prototype for functions passed to asynctcp_callback() */
 typedef void (*asynctcp_callback_fn)(void *ctx);
 err_t asynctcp_callback(asynctcp_callback_fn function, void *ctx);
