@@ -56,7 +56,7 @@ extern "C" {
 AsyncConsole AsyncTCPConsole;
 #define ASYNC_TCP_CONSOLE_I(f_, ...)  //AsyncTCPConsole.printf_P(PSTR("I [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
 #define ASYNC_TCP_CONSOLE_E(f_, ...)  AsyncTCPConsole.printf_P(PSTR("E [AsyncTCP] %s(), line %u: " f_ "\r\n"),  __func__, __LINE__, ##__VA_ARGS__)
-#define ASYNC_TCP_CONSOLE_W(f_, ...)  AsyncTCPConsole.printf_P(PSTR("[AsyncTCP] " f_ "\r\n"), ##__VA_ARGS__)
+#define ASYNC_TCP_CONSOLE_W(f_, ...)  AsyncTCPConsole.printf_P(PSTR("W [AsyncTCP] " f_ "\r\n"), ##__VA_ARGS__)
 
 // Required for:
 // https://github.com/espressif/arduino-esp32/blob/3.0.3/libraries/Network/src/NetworkInterface.cpp#L37-L47
@@ -555,7 +555,7 @@ err_t AsyncTCP_detail::tcp_accept(void *arg, tcp_pcb *c_pcb, err_t err) {
   s8_t slot = (e) ? _register_client_slot(c) : INVALID_CLIENT_SLOT;
   bool accepted = (slot != INVALID_CLIENT_SLOT && s->_listen_connect_cb) ? true : false;
   
-  ASYNC_TCP_CONSOLE_I("New pcb: %u, err = %d, c %u", c_pcb, err, c);
+  ASYNC_TCP_CONSOLE_W("New pcb: %u, err = %d, c %u", c_pcb, err, c);
   if (!accepted) {
     ASYNC_TCP_CONSOLE_E("Accept failed: %d", err);
 
