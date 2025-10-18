@@ -2,32 +2,13 @@
 // Copyright 2016-2025 Hristo Gochkov, Mathieu Carbou, Emil Muratov
 
 #include "AsyncTCP.h"
+#include "AsyncTCPLogging.h"
 #include "AsyncTCPSimpleIntrusiveList.h"
 
-#ifndef LIBRETINY
-#include <esp_log.h>
-
-#ifdef ARDUINO
-#include "Arduino.h"
-#include <esp32-hal.h>
-#include <esp32-hal-log.h>
-#if (ESP_IDF_VERSION_MAJOR >= 5)
-#include <NetworkInterface.h>
-#endif
-#else
-#include "esp_timer.h"
-#define log_e(...) ESP_LOGE(__FILE__, __VA_ARGS__)
-#define log_w(...) ESP_LOGW(__FILE__, __VA_ARGS__)
-#define log_i(...) ESP_LOGI(__FILE__, __VA_ARGS__)
-#define log_d(...) ESP_LOGD(__FILE__, __VA_ARGS__)
-#define log_v(...) ESP_LOGV(__FILE__, __VA_ARGS__)
-static unsigned long millis() {
-  return (unsigned long)(esp_timer_get_time() / 1000ULL);
-}
-#endif
-#endif
-
-#ifdef LIBRETINY
+/**
+ * LibreTiny specific configurations
+ */
+#if defined(LIBRETINY)
 #include <Arduino.h>
 // LibreTiny does not support IDF - disable code that expects it to be available
 #define ESP_IDF_VERSION_MAJOR (0)
@@ -36,9 +17,28 @@ static unsigned long millis() {
 // ESP watchdog is not available
 #undef CONFIG_ASYNC_TCP_USE_WDT
 #define CONFIG_ASYNC_TCP_USE_WDT 0
-#endif
+#endif  // LIBRETINY
 
-#include <assert.h>
+/**
+ * Arduino specific configurations
+ */
+#if defined(ARDUINO) && !defined(LIBRETINY)
+#include <Arduino.h>
+#include <esp_idf_version.h>
+#if (ESP_IDF_VERSION_MAJOR >= 5)
+#include <NetworkInterface.h>
+#endif  // ESP_IDF_VERSION_MAJOR
+#endif  // ARDUINO
+
+/**
+ * ESP-IDF specific configurations
+ */
+#if !defined(LIBRETINY) && !defined(ARDUINO)
+#include "esp_timer.h"
+static unsigned long millis() {
+  return (unsigned long)(esp_timer_get_time() / 1000ULL);
+}
+#endif  // !LIBRETINY && !ARDUINO
 
 extern "C" {
 #include "lwip/dns.h"
@@ -316,6 +316,15 @@ static bool _is_pcb_slot_valid(s8_t slot, tcp_pcb *pcb) {
 static SimpleIntrusiveList<lwip_tcp_event_packet_t> _async_queue;
 TaskHandle_t _async_service_task_handle = NULL;
 
+static uint32_t _xor_shift_state = 31;  // any nonzero seed will do
+static uint32_t _xor_shift_next() {
+  uint32_t x = _xor_shift_state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  return _xor_shift_state = x;
+}
+
 static void _free_event(lwip_tcp_event_packet_t *e) {
   if ((e->event == LWIP_TCP_RECV) && e->recv.pb) {
     ASYNC_TCP_CONSOLE_E("ev %u: c %u event %u len %u", e, e->client, e->event, e->recv.pb->tot_len);
@@ -325,14 +334,18 @@ static void _free_event(lwip_tcp_event_packet_t *e) {
 }
 
 static inline void _send_async_event(lwip_tcp_event_packet_t *e) {
-  assert(e != nullptr);
+  if (e == nullptr) {
+    return;
+  }
   // ASYNC_TCP_CONSOLE_I("ev %u: c %u event %u", e, e->client, e->event);
   _async_queue.push_back(e);
   xTaskNotifyGive(_async_service_task_handle);
 }
 
 static inline void _prepend_async_event(lwip_tcp_event_packet_t *e) {
-  assert(e != nullptr);
+  if (e == nullptr) {
+    return;
+  }
   // ASYNC_TCP_CONSOLE_I("ev %u: c %u event %u", e, e->client, e->event);
   _async_queue.push_front(e);
   xTaskNotifyGive(_async_service_task_handle);
@@ -371,7 +384,7 @@ static inline lwip_tcp_event_packet_t *_get_async_event() {
       Let's discard poll events processing using linear-increasing probability curve when queue size grows over 3/4
       Poll events are periodic and connection could get another chance next time
     */
-    if (_async_queue.size() > (rand() % CONFIG_ASYNC_TCP_QUEUE_SIZE / 4 + CONFIG_ASYNC_TCP_QUEUE_SIZE * 3 / 4)) {
+    if (_async_queue.size() > (_xor_shift_next() % CONFIG_ASYNC_TCP_QUEUE_SIZE / 4 + CONFIG_ASYNC_TCP_QUEUE_SIZE * 3 / 4)) {
       _free_event(e);
       ASYNC_TCP_CONSOLE_I("discarding poll due to queue congestion");
       continue;
@@ -616,7 +629,7 @@ err_t AsyncTCP_detail::tcp_poll(void *arg, struct tcp_pcb *pcb) {
   // throttle polling events queueing when event queue is getting filled up, let it handle _onack's
   {
     queue_mutex_guard guard;
-    if (_async_queue.size() > (rand() % CONFIG_ASYNC_TCP_QUEUE_SIZE / 4 + CONFIG_ASYNC_TCP_QUEUE_SIZE * 3 / 4)) {
+    if (_async_queue.size() > (_xor_shift_next() % CONFIG_ASYNC_TCP_QUEUE_SIZE / 2 + CONFIG_ASYNC_TCP_QUEUE_SIZE / 4)) {
       ASYNC_TCP_CONSOLE_E("throttling");
       return ERR_OK;
     }
